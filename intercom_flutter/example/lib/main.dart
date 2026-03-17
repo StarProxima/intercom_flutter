@@ -2,8 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:intercom_flutter_webview/intercom_flutter_webview.dart';
 
+const _appId = 'hc41m06w';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // TODO: preload может конфликтовать с основным WebView через shared cookies
+  // IntercomWebViewOverlay.preload(appId: _appId);
   runApp(const SampleApp());
 }
 
@@ -48,10 +52,11 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _nativeSdkInitialized = false;
+  bool _overlayLoading = false;
 
   Future<void> _initNativeSdk() async {
     try {
-      await Intercom.instance.initialize('hc41m06w');
+      await Intercom.instance.initialize(_appId);
       await Intercom.instance.loginUnidentifiedUser();
       setState(() => _nativeSdkInitialized = true);
       if (mounted) {
@@ -64,6 +69,15 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       if (mounted) _showError('Native SDK init failed', e);
+    }
+  }
+
+  Future<void> _openOverlay() async {
+    setState(() => _overlayLoading = true);
+    try {
+      await IntercomWebViewOverlay.show(context, appId: _appId);
+    } finally {
+      if (mounted) setState(() => _overlayLoading = false);
     }
   }
 
@@ -101,7 +115,7 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
         children: [
           // --- WebView ---
-          _SectionHeader(
+          const _SectionHeader(
             title: 'WebView Messenger',
             subtitle: 'Кроссплатформенный, без нативного SDK',
           ),
@@ -111,7 +125,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => const IntercomWebViewScreen(
-                    appId: 'hc41m06w',
+                    appId: _appId,
                   ),
                 ),
               );
@@ -120,13 +134,19 @@ class _HomeScreenState extends State<HomeScreen> {
             label: const Text('Open WebView Messenger'),
           ),
           const SizedBox(height: 8),
+          _LoadingButton(
+            loading: _overlayLoading,
+            onPressed: _openOverlay,
+            icon: Icons.layers_outlined,
+            label: 'Open as Overlay',
+          ),
+          const SizedBox(height: 8),
           FilledButton.tonalIcon(
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
                   builder: (_) => const IntercomWebViewScreen(
-                    appId: 'hc41m06w',
-                    // Пример с прокси
+                    appId: _appId,
                     // proxyConfig: ProxyConfig(host: '127.0.0.1', port: 8080),
                   ),
                 ),
@@ -139,7 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 32),
 
           // --- Native SDK ---
-          _SectionHeader(
+          const _SectionHeader(
             title: 'Native SDK',
             subtitle: 'Android / iOS only',
           ),
@@ -205,6 +225,39 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Кнопка с индикатором загрузки внутри.
+class _LoadingButton extends StatelessWidget {
+  final bool loading;
+  final VoidCallback onPressed;
+  final IconData icon;
+  final String label;
+
+  const _LoadingButton({
+    required this.loading,
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.icon(
+      onPressed: loading ? null : onPressed,
+      icon: loading
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            )
+          : Icon(icon),
+      label: Text(label),
     );
   }
 }

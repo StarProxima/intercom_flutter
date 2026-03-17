@@ -10,8 +10,18 @@ class IntercomHtmlBuilder {
   final String? userHash;
   final String? userName;
 
-  /// 'light' или 'dark' - синхронизация с темой приложения
+  /// 'light' или 'dark'
   final String colorScheme;
+
+  /// Отступ сверху в пикселях (для status bar).
+  final double topInset;
+
+  /// Отступ снизу в пикселях (для navigation indicator).
+  final double bottomInset;
+
+  /// Если false - загружает SDK, но не вызывает Intercom('show').
+  /// Для preload-сценария.
+  final bool autoShow;
 
   const IntercomHtmlBuilder({
     required this.appId,
@@ -20,14 +30,15 @@ class IntercomHtmlBuilder {
     this.userHash,
     this.userName,
     this.colorScheme = 'light',
+    this.topInset = 0,
+    this.bottomInset = 0,
+    this.autoShow = true,
   });
 
   String build() {
     final settingsEntries = <String>[
       "app_id: '$appId'",
-      // Прячем дефолтный лаунчер - мы сами вызываем show()
       'hide_default_launcher: true',
-      "color_scheme: '$colorScheme'",
     ];
 
     if (userId != null) settingsEntries.add("user_id: '$userId'");
@@ -37,57 +48,104 @@ class IntercomHtmlBuilder {
 
     final intercomSettings = settingsEntries.join(',\n        ');
 
-    final bgColor = colorScheme == 'dark' ? '#1a1a1a' : '#ffffff';
-    final textColor = colorScheme == 'dark' ? '#ffffff' : '#000000';
+    final topPx = topInset.toInt();
+    final bottomPx = bottomInset.toInt();
+
+    // Fallback цвет когда JS-детект не сработал
+    final fallbackBg = colorScheme == 'dark' ? '#1a1a1a' : '#ffffff';
+
+    final showJs = autoShow
+        ? '''
+          window.Intercom('show');
+          window.Intercom('onShow', function() {
+            applyIntercomBg();
+            _notifyFlutter('onIntercomReady');
+          });'''
+        : "_notifyFlutter('onSdkLoaded');";
 
     return '''
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Support</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: $bgColor;
-      color: $textColor;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    html, body {
+      background: transparent;
+      width: 100%;
+      height: 100%;
     }
-    #loading {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      font-size: 16px;
-      opacity: 0.5;
-    }
-    /* Intercom фрейм растягиваем на весь экран */
     .intercom-lightweight-app-launcher,
     .intercom-launcher-frame {
       display: none !important;
     }
     .intercom-messenger-frame {
       position: fixed !important;
-      top: 0 !important;
+      top: ${topPx}px !important;
       left: 0 !important;
       right: 0 !important;
-      bottom: 0 !important;
+      bottom: ${bottomPx}px !important;
       width: 100% !important;
-      height: 100% !important;
-      max-height: 100% !important;
+      height: calc(100% - ${topPx + bottomPx}px) !important;
+      max-height: calc(100% - ${topPx + bottomPx}px) !important;
       border-radius: 0 !important;
       box-shadow: none !important;
     }
   </style>
 </head>
 <body>
-  <div id="loading">Loading...</div>
-
   <script>
     window.intercomSettings = {
         $intercomSettings
     };
+
+    function _notifyFlutter(handler, data) {
+      if (window.flutter_inappwebview) {
+        window.flutter_inappwebview.callHandler(handler, data);
+      }
+    }
+
+    // Определяет background-color из Intercom контейнерных элементов.
+    // Стратегия: сканируем все intercom-элементы в нашем DOM,
+    // ищем первый с не-прозрачным background.
+    function detectIntercomBg() {
+      var els = document.querySelectorAll(
+        '#intercom-container, #intercom-frame, ' +
+        '.intercom-messenger-frame, [class*="intercom"]'
+      );
+      for (var i = 0; i < els.length; i++) {
+        var bg = getComputedStyle(els[i]).backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+          return bg;
+        }
+      }
+      return null;
+    }
+
+    function applyIntercomBg() {
+      var attempts = 0;
+      var applied = false;
+      var interval = setInterval(function() {
+        if (applied) { clearInterval(interval); return; }
+        var bg = detectIntercomBg();
+        if (bg) {
+          document.body.style.background = bg;
+          _notifyFlutter('onIntercomColor', bg);
+          applied = true;
+          clearInterval(interval);
+        }
+        if (++attempts > 30) {
+          clearInterval(interval);
+          // Fallback - используем цвет на основе темы
+          if (!applied) {
+            document.body.style.background = '$fallbackBg';
+            _notifyFlutter('onIntercomColor', '$fallbackBg');
+          }
+        }
+      }, 150);
+    }
 
     (function() {
       var w = window;
@@ -107,23 +165,15 @@ class IntercomHtmlBuilder {
         s.async = true;
         s.src = 'https://widget.intercom.io/widget/$appId';
         s.onload = function() {
-          // SDK загружен - открываем мессенджер
-          document.getElementById('loading').style.display = 'none';
-          window.Intercom('show');
-        };
-        s.onerror = function() {
-          document.getElementById('loading').textContent = 'Failed to load. Check your connection.';
+          $showJs
         };
         var x = d.getElementsByTagName('script')[0];
         x.parentNode.insertBefore(s, x);
       }
     })();
 
-    // Перехват закрытия мессенджера - уведомляем Flutter
     window.Intercom('onHide', function() {
-      if (window.flutter_inappwebview) {
-        window.flutter_inappwebview.callHandler('onIntercomHide');
-      }
+      _notifyFlutter('onIntercomHide');
     });
   </script>
 </body>
