@@ -1,0 +1,21 @@
+name: intercom_flutter_webview
+description: >-
+  Intercom Web Messenger via InAppWebView.
+  Works on Android, iOS, Windows, macOS - anywhere WebView is available.
+  No native Intercom SDK required.
+version: 0.1.0
+homepage: https://github.com/v3rm0n/intercom_flutter
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_inappwebview: ^6.1.5
+  url_launcher: ^6.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+  flutter: ">=3.10.0"

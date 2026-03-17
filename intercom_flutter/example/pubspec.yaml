@@ -10,6 +10,8 @@ dependencies:
 
   intercom_flutter:
     path: ../
+  intercom_flutter_webview:
+    path: ../../intercom_flutter_webview
 
 dependency_overrides:
   intercom_flutter:
