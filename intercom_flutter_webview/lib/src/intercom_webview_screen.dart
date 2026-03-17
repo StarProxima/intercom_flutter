@@ -33,6 +33,7 @@ class IntercomWebViewScreen extends StatefulWidget {
 
 class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   bool _isLoading = true;
+  bool _proxyReady = false;
 
   @override
   void initState() {
@@ -45,11 +46,13 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
     if (proxy != null) {
       await proxy.applyProxy();
     }
+    if (mounted) {
+      setState(() => _proxyReady = true);
+    }
   }
 
   @override
   void dispose() {
-    // Сброс прокси при выходе с экрана
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy();
     }
@@ -58,6 +61,21 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Ждём применения прокси перед созданием WebView -
+    // на Windows прокси инжектится в browser args при создании environment
+    if (!_proxyReady) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Support'),
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     final htmlBuilder = IntercomHtmlBuilder(
@@ -153,10 +171,6 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
       supportZoom: false,
       transparentBackground: true,
     );
-
-    // Windows: прокси через --proxy-server browser arg
-    // flutter_inappwebview 6.x не экспозит WebViewEnvironmentSettings напрямую.
-    // TODO: добавить Windows proxy когда API станет доступным
 
     return settings;
   }

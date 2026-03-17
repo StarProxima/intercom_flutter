@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -84,9 +85,11 @@ class IntercomWebViewOverlay extends StatefulWidget {
 }
 
 class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
+  bool _proxyReady = false;
   bool _intercomReady = false;
   bool _showFallbackClose = false;
   Timer? _fallbackTimer;
+  Color? _intercomBgColor;
 
   @override
   void initState() {
@@ -108,6 +111,9 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
     if (proxy != null) {
       await proxy.applyProxy();
     }
+    if (mounted) {
+      setState(() => _proxyReady = true);
+    }
   }
 
   @override
@@ -123,8 +129,39 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// Парсит CSS цвет вида "rgb(R, G, B)" или "rgba(R, G, B, A)".
+  Color? _parseRgba(String css) {
+    final match = RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
+    if (match == null) return null;
+    return Color.fromARGB(
+      255,
+      int.parse(match.group(1)!),
+      int.parse(match.group(2)!),
+      int.parse(match.group(3)!),
+    );
+  }
+
+  void _updateSystemChrome(Color color) {
+    final brightness =
+        ThemeData.estimateBrightnessForColor(color) == Brightness.dark
+            ? Brightness.light
+            : Brightness.dark;
+    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+      statusBarColor: color,
+      statusBarIconBrightness: brightness,
+      systemNavigationBarColor: color,
+      systemNavigationBarIconBrightness: brightness,
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Ждём применения прокси перед созданием WebView -
+    // на Windows прокси инжектится в browser args при создании environment
+    if (!_proxyReady) {
+      return const SizedBox.shrink();
+    }
+
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final padding = MediaQuery.of(context).padding;
 
@@ -140,7 +177,7 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
     );
 
     return Material(
-      color: Colors.transparent,
+      color: _intercomBgColor ?? Colors.transparent,
       child: Stack(
         children: [
           Positioned.fill(
@@ -161,6 +198,20 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
                         _showFallbackClose = false;
                       });
                       _fallbackTimer?.cancel();
+                    }
+                  },
+                );
+
+                // Intercom отрендерился - JS детектит цвет фона и шлёт сюда
+                controller.addJavaScriptHandler(
+                  handlerName: 'onIntercomColor',
+                  callback: (args) {
+                    if (args.isNotEmpty && mounted) {
+                      final color = _parseRgba(args[0] as String);
+                      if (color != null) {
+                        setState(() => _intercomBgColor = color);
+                        _updateSystemChrome(color);
+                      }
                     }
                   },
                 );
