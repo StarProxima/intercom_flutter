@@ -51,7 +51,7 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   void dispose() {
     // Сброс прокси при выходе с экрана
     if (widget.proxyConfig != null) {
-      ProxyConfig.clearAndroidProxy();
+      ProxyConfig.clearProxy();
     }
     super.dispose();
   }

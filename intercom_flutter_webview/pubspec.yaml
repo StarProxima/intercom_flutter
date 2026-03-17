@@ -9,7 +9,8 @@ homepage: https://github.com/v3rm0n/intercom_flutter
 dependencies:
   flutter:
     sdk: flutter
-  flutter_inappwebview: ^6.1.5
+  flutter_inappwebview:
+    path: ../../flutter_inappwebview/flutter_inappwebview
   url_launcher: ^6.3.0
 
 dev_dependencies:
