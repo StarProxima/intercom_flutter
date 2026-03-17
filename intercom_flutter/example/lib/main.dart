@@ -1,89 +1,263 @@
 import 'package:flutter/material.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
-
 import 'package:intercom_flutter_webview/intercom_flutter_webview.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Intercom.instance.initialize('hc41m06w');
-  // Логиним анонимного юзера, чтобы мессенджер загрузился
-  await Intercom.instance.loginUnidentifiedUser();
-  runApp(SampleApp());
+  runApp(const SampleApp());
 }
 
-class SampleApp extends StatelessWidget {
+class SampleApp extends StatefulWidget {
+  const SampleApp({super.key});
+
+  @override
+  State<SampleApp> createState() => _SampleAppState();
+}
+
+class _SampleAppState extends State<SampleApp> {
+  ThemeMode _themeMode = ThemeMode.system;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      // Поддержка dark mode для проверки color_scheme
-      themeMode: ThemeMode.system,
+      debugShowCheckedModeBanner: false,
+      themeMode: _themeMode,
       theme: ThemeData.light(useMaterial3: true),
       darkTheme: ThemeData.dark(useMaterial3: true),
-      home: const HomeScreen(),
+      home: HomeScreen(
+        themeMode: _themeMode,
+        onThemeModeChanged: (mode) => setState(() => _themeMode = mode),
+      ),
     );
   }
 }
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class HomeScreen extends StatefulWidget {
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
+
+  const HomeScreen({
+    super.key,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  bool _nativeSdkInitialized = false;
+
+  Future<void> _initNativeSdk() async {
+    try {
+      await Intercom.instance.initialize('hc41m06w');
+      await Intercom.instance.loginUnidentifiedUser();
+      setState(() => _nativeSdkInitialized = true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Native SDK initialized'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) _showError('Native SDK init failed', e);
+    }
+  }
+
+  Future<void> _runSafe(String label, Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) _showError(label, e);
+    }
+  }
+
+  void _showError(String label, Object error) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$label: $error'),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: Theme.of(context).colorScheme.error,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Intercom test'),
+        title: const Text('Intercom Example'),
+        actions: [
+          _ThemeToggle(
+            themeMode: widget.themeMode,
+            onChanged: widget.onThemeModeChanged,
+          ),
+        ],
       ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // --- Native SDK ---
-            const Text(
-              'Native SDK',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            ElevatedButton(
-              onPressed: () => Intercom.instance.displayMessenger(),
-              child: const Text('Open Messenger'),
-            ),
-            const SizedBox(height: 8),
-            ElevatedButton(
-              onPressed: () => Intercom.instance.displayHome(),
-              child: const Text('Open Home'),
-            ),
-            const SizedBox(height: 8),
-            ElevatedButton(
-              onPressed: () => Intercom.instance.displayHelpCenter(),
-              child: const Text('Open Help Center'),
-            ),
-
-            const SizedBox(height: 32),
-            const Divider(),
-            const SizedBox(height: 16),
-
-            // --- WebView ---
-            const Text(
-              'WebView (кроссплатформенный)',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const IntercomWebViewScreen(
-                      appId: 'hc41m06w',
-                      // proxyConfig: ProxyConfig(host: '...', port: 8080),
-                    ),
+      body: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        children: [
+          // --- WebView ---
+          _SectionHeader(
+            title: 'WebView Messenger',
+            subtitle: 'Кроссплатформенный, без нативного SDK',
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const IntercomWebViewScreen(
+                    appId: 'hc41m06w',
                   ),
-                );
-              },
-              child: const Text('Open WebView Messenger'),
+                ),
+              );
+            },
+            icon: const Icon(Icons.chat_outlined),
+            label: const Text('Open WebView Messenger'),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const IntercomWebViewScreen(
+                    appId: 'hc41m06w',
+                    // Пример с прокси
+                    // proxyConfig: ProxyConfig(host: '127.0.0.1', port: 8080),
+                  ),
+                ),
+              );
+            },
+            icon: const Icon(Icons.vpn_lock_outlined),
+            label: const Text('WebView + Proxy (demo)'),
+          ),
+
+          const SizedBox(height: 32),
+
+          // --- Native SDK ---
+          _SectionHeader(
+            title: 'Native SDK',
+            subtitle: 'Android / iOS only',
+          ),
+          const SizedBox(height: 12),
+          if (!_nativeSdkInitialized) ...[
+            OutlinedButton.icon(
+              onPressed: _initNativeSdk,
+              icon: const Icon(Icons.power_settings_new),
+              label: const Text('Initialize Native SDK'),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'SDK не инициализирован. Нажми кнопку выше.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+            ),
+          ] else ...[
+            OutlinedButton.icon(
+              onPressed: () => _runSafe(
+                'displayMessenger',
+                Intercom.instance.displayMessenger,
+              ),
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Open Messenger'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _runSafe(
+                'displayHome',
+                Intercom.instance.displayHome,
+              ),
+              icon: const Icon(Icons.home_outlined),
+              label: const Text('Open Home'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _runSafe(
+                'displayHelpCenter',
+                Intercom.instance.displayHelpCenter,
+              ),
+              icon: const Icon(Icons.help_outline),
+              label: const Text('Open Help Center'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _runSafe(
+                'displayMessages',
+                Intercom.instance.displayMessages,
+              ),
+              icon: const Icon(Icons.message_outlined),
+              label: const Text('Open Messages'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _runSafe(
+                'displayTickets',
+                Intercom.instance.displayTickets,
+              ),
+              icon: const Icon(Icons.confirmation_number_outlined),
+              label: const Text('Open Tickets'),
             ),
           ],
-        ),
+        ],
       ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final String subtitle;
+
+  const _SectionHeader({required this.title, required this.subtitle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 2),
+        Text(
+          subtitle,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ThemeToggle extends StatelessWidget {
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onChanged;
+
+  const _ThemeToggle({required this.themeMode, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = switch (themeMode) {
+      ThemeMode.light => Icons.light_mode,
+      ThemeMode.dark => Icons.dark_mode,
+      ThemeMode.system => Icons.brightness_auto,
+    };
+
+    return IconButton(
+      icon: Icon(icon),
+      tooltip: 'Theme: ${themeMode.name}',
+      onPressed: () {
+        final next = switch (themeMode) {
+          ThemeMode.system => ThemeMode.light,
+          ThemeMode.light => ThemeMode.dark,
+          ThemeMode.dark => ThemeMode.system,
+        };
+        onChanged(next);
+      },
     );
   }
 }
