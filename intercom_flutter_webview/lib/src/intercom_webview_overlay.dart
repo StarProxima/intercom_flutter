@@ -97,10 +97,7 @@ class IntercomWebViewOverlay extends StatefulWidget {
             if (!completer.isCompleted) completer.complete();
           },
         );
-        final html = IntercomHtmlBuilder(
-          appId: appId,
-          autoShow: false,
-        ).build();
+        final html = IntercomHtmlBuilder(appId: appId, autoShow: false).build();
         controller.loadData(
           data: html,
           baseUrl: WebUri('https://app.intercom.io'),
@@ -122,9 +119,13 @@ class IntercomWebViewOverlay extends StatefulWidget {
   State<IntercomWebViewOverlay> createState() => _IntercomWebViewOverlayState();
 }
 
-class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
+class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  late final AnimationController _slideController;
+
   bool _proxyReady = false;
   bool _intercomReady = false;
+  bool _closing = false;
   bool _showFallbackClose = false;
   Timer? _fallbackTimer;
   Color? _intercomBgColor;
@@ -132,17 +133,30 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _slideController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
     _setupProxy();
     _startFallbackTimer();
   }
 
   @override
   void dispose() {
+    _slideController.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy();
     }
     super.dispose();
+  }
+
+  @override
+  Future<bool> didPopRoute() async {
+    _close();
+    return true;
   }
 
   void _startFallbackTimer() {
@@ -169,14 +183,15 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
     widget.onReady?.call();
   }
 
-  void _close() {
-    if (!mounted) return;
+  Future<void> _close() async {
+    if (!mounted || _closing) return;
+    _closing = true;
+    await _slideController.forward(); // slide down
     widget.onClose?.call();
   }
 
   Color? _parseColor(String css) {
-    final rgbMatch =
-        RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
+    final rgbMatch = RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
     if (rgbMatch != null) {
       return Color.fromARGB(
         255,
@@ -197,14 +212,16 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
     setState(() => _intercomBgColor = color);
     final iconBrightness =
         ThemeData.estimateBrightnessForColor(color) == Brightness.dark
-            ? Brightness.light
-            : Brightness.dark;
-    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
-      statusBarColor: color,
-      statusBarIconBrightness: iconBrightness,
-      systemNavigationBarColor: color,
-      systemNavigationBarIconBrightness: iconBrightness,
-    ));
+        ? Brightness.light
+        : Brightness.dark;
+    SystemChrome.setSystemUIOverlayStyle(
+      SystemUiOverlayStyle(
+        statusBarColor: color,
+        statusBarIconBrightness: iconBrightness,
+        systemNavigationBarColor: color,
+        systemNavigationBarIconBrightness: iconBrightness,
+      ),
+    );
   }
 
   @override
@@ -213,38 +230,48 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay> {
 
     final padding = MediaQuery.of(context).padding;
 
-    return IgnorePointer(
-      ignoring: !_intercomReady,
-      child: Stack(
-        children: [
-          // Фон за safe area (цвет Intercom).
-          // Всегда в дереве чтобы не менять индексы children в Stack -
-          // иначе InAppWebView пересоздаётся (Flutter матчит по индексу).
-          Positioned.fill(
-            child: ColoredBox(
-              color: _intercomBgColor ?? Colors.transparent,
+    return SlideTransition(
+      position:
+          Tween<Offset>(
+            begin: Offset.zero,
+            end: const Offset(0, 1), // уезжает вниз-вправо
+          ).animate(
+            CurvedAnimation(
+              parent: _slideController,
+              curve: Curves.easeInCubic,
             ),
           ),
-
-          // WebView - прозрачный, Intercom анимирует себя сам
-          Positioned.fill(
-            child: InAppWebView(
-              initialSettings: _buildSettings(),
-              onWebViewCreated: _onWebViewCreated,
-              onConsoleMessage: (_, msg) {
-                debugPrint('[Intercom WebView] ${msg.message}');
-              },
-              shouldOverrideUrlLoading: _handleUrlLoading,
+      child: IgnorePointer(
+        ignoring: !_intercomReady || _closing,
+        child: Stack(
+          children: [
+            // Фон за safe area (цвет Intercom).
+            // Всегда в дереве чтобы не менять индексы children в Stack -
+            // иначе InAppWebView пересоздаётся (Flutter матчит по индексу).
+            Positioned.fill(
+              child: ColoredBox(color: _intercomBgColor ?? Colors.transparent),
             ),
-          ),
 
-          if (_showFallbackClose)
-            Positioned(
-              top: padding.top + 8,
-              right: 8,
-              child: _FallbackCloseButton(onPressed: _close),
+            // WebView - прозрачный, Intercom анимирует себя сам
+            Positioned.fill(
+              child: InAppWebView(
+                initialSettings: _buildSettings(),
+                onWebViewCreated: _onWebViewCreated,
+                onConsoleMessage: (_, msg) {
+                  debugPrint('[Intercom WebView] ${msg.message}');
+                },
+                shouldOverrideUrlLoading: _handleUrlLoading,
+              ),
             ),
-        ],
+
+            if (_showFallbackClose)
+              Positioned(
+                top: padding.top + 8,
+                right: 8,
+                child: _FallbackCloseButton(onPressed: _close),
+              ),
+          ],
+        ),
       ),
     );
   }
