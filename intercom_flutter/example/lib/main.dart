@@ -74,6 +74,8 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _overlayLoading = true);
     try {
       await IntercomWebViewOverlay.show(context, appId: _appId);
+    } on IntercomLoadException catch (e) {
+      if (mounted) _showError('Intercom', e.message);
     } finally {
       if (mounted) setState(() => _overlayLoading = false);
     }

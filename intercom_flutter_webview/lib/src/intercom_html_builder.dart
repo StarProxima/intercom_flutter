@@ -173,6 +173,11 @@ class IntercomHtmlBuilder {
         s.onload = function() {
           $showJs
         };
+        s.onerror = function() {
+          _notifyFlutter('onIntercomError',
+            'Failed to load Intercom SDK from intercomcdn.com. ' +
+            'Check network connection or proxy settings.');
+        };
         var x = d.getElementsByTagName('script')[0];
         x.parentNode.insertBefore(s, x);
       }
