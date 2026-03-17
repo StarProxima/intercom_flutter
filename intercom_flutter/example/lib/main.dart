@@ -6,8 +6,6 @@ const _appId = 'hc41m06w';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // TODO: preload может конфликтовать с основным WebView через shared cookies
-  // IntercomWebViewOverlay.preload(appId: _appId);
   runApp(const SampleApp());
 }
 
@@ -124,9 +122,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const IntercomWebViewScreen(
-                    appId: _appId,
-                  ),
+                  builder: (_) => const IntercomWebViewScreen(appId: _appId),
                 ),
               );
             },
@@ -174,8 +170,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Text(
               'SDK не инициализирован. Нажми кнопку выше.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.outline,
-                  ),
+                color: Theme.of(context).colorScheme.outline,
+              ),
             ),
           ] else ...[
             OutlinedButton.icon(
@@ -188,10 +184,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
-              onPressed: () => _runSafe(
-                'displayHome',
-                Intercom.instance.displayHome,
-              ),
+              onPressed: () =>
+                  _runSafe('displayHome', Intercom.instance.displayHome),
               icon: const Icon(Icons.home_outlined),
               label: const Text('Open Home'),
             ),
@@ -215,10 +209,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
-              onPressed: () => _runSafe(
-                'displayTickets',
-                Intercom.instance.displayTickets,
-              ),
+              onPressed: () =>
+                  _runSafe('displayTickets', Intercom.instance.displayTickets),
               icon: const Icon(Icons.confirmation_number_outlined),
               label: const Text('Open Tickets'),
             ),
@@ -278,8 +270,8 @@ class _SectionHeader extends StatelessWidget {
         Text(
           subtitle,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.outline,
-              ),
+            color: Theme.of(context).colorScheme.outline,
+          ),
         ),
       ],
     );

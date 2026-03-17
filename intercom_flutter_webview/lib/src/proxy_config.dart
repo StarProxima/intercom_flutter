@@ -25,6 +25,7 @@ class ProxyConfig {
 
   /// Применяет прокси через ProxyController.
   /// Работает на Android, iOS 17+, macOS 14+, Windows.
+  /// На iOS < 17 / macOS < 14 вернёт false (API недоступен).
   Future<bool> applyProxy() async {
     if (!Platform.isAndroid &&
         !Platform.isIOS &&
@@ -33,24 +34,33 @@ class ProxyConfig {
       return false;
     }
 
-    final proxyController = ProxyController.instance();
-    final proxySettings = ProxySettings(
-      proxyRules: [
-        ProxyRule(url: proxyUrl),
-      ],
-    );
-    await proxyController.setProxyOverride(settings: proxySettings);
-    return true;
+    try {
+      final proxyController = ProxyController.instance();
+      final proxySettings = ProxySettings(
+        proxyRules: [ProxyRule(url: proxyUrl)],
+      );
+      await proxyController.setProxyOverride(settings: proxySettings);
+      return true;
+    } catch (_) {
+      // iOS < 17 / macOS < 14: ProxyController недоступен
+      return false;
+    }
   }
 
   /// Сброс прокси.
   static Future<void> clearProxy() async {
-    if (Platform.isAndroid ||
-        Platform.isIOS ||
-        Platform.isMacOS ||
-        Platform.isWindows) {
+    if (!Platform.isAndroid &&
+        !Platform.isIOS &&
+        !Platform.isMacOS &&
+        !Platform.isWindows) {
+      return;
+    }
+
+    try {
       final proxyController = ProxyController.instance();
       await proxyController.clearProxyOverride();
+    } catch (_) {
+      // iOS < 17 / macOS < 14: ProxyController недоступен
     }
   }
 

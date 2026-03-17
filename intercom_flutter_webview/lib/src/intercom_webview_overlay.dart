@@ -82,38 +82,6 @@ class IntercomWebViewOverlay extends StatefulWidget {
     await readyCompleter.future;
   }
 
-  /// Предзагрузка Intercom SDK в фоне.
-  static Future<void> preload({required String appId}) async {
-    final completer = Completer<void>();
-    final headless = HeadlessInAppWebView(
-      initialSettings: InAppWebViewSettings(
-        javaScriptEnabled: true,
-        domStorageEnabled: true,
-      ),
-      onWebViewCreated: (controller) {
-        controller.addJavaScriptHandler(
-          handlerName: 'onSdkLoaded',
-          callback: (_) {
-            if (!completer.isCompleted) completer.complete();
-          },
-        );
-        final html = IntercomHtmlBuilder(appId: appId, autoShow: false).build();
-        controller.loadData(
-          data: html,
-          baseUrl: WebUri('https://app.intercom.io'),
-          mimeType: 'text/html',
-          encoding: 'utf-8',
-        );
-      },
-    );
-
-    await headless.run();
-    await completer.future.timeout(
-      const Duration(seconds: 15),
-      onTimeout: () {},
-    );
-    await headless.dispose();
-  }
 
   @override
   State<IntercomWebViewOverlay> createState() => _IntercomWebViewOverlayState();
@@ -344,9 +312,7 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
       useHybridComposition: true,
       domStorageEnabled: true,
-      userAgent:
-          'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
-          '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      // Дефолтный UA от WebView движка (десктоп подставит десктопный)
       supportZoom: false,
       transparentBackground: true,
     );

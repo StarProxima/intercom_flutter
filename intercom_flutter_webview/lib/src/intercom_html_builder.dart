@@ -19,10 +19,6 @@ class IntercomHtmlBuilder {
   /// Отступ снизу в пикселях (для navigation indicator).
   final double bottomInset;
 
-  /// Если false - загружает SDK, но не вызывает Intercom('show').
-  /// Для preload-сценария.
-  final bool autoShow;
-
   const IntercomHtmlBuilder({
     required this.appId,
     this.userId,
@@ -32,19 +28,31 @@ class IntercomHtmlBuilder {
     this.colorScheme = 'light',
     this.topInset = 0,
     this.bottomInset = 0,
-    this.autoShow = true,
   });
 
+  /// Экранирует строку для вставки в JS литерал внутри одинарных кавычек.
+  static String _escapeJs(String value) {
+    return value
+        .replaceAll(r'\', r'\\')
+        .replaceAll("'", r"\'")
+        .replaceAll('\n', r'\n')
+        .replaceAll('\r', r'\r')
+        .replaceAll('</', r'<\/');
+  }
+
   String build() {
+    final safeAppId = _escapeJs(appId);
     final settingsEntries = <String>[
-      "app_id: '$appId'",
+      "app_id: '$safeAppId'",
       'hide_default_launcher: true',
     ];
 
-    if (userId != null) settingsEntries.add("user_id: '$userId'");
-    if (email != null) settingsEntries.add("email: '$email'");
-    if (userHash != null) settingsEntries.add("user_hash: '$userHash'");
-    if (userName != null) settingsEntries.add("name: '$userName'");
+    if (userId != null) settingsEntries.add("user_id: '${_escapeJs(userId!)}'");
+    if (email != null) settingsEntries.add("email: '${_escapeJs(email!)}'");
+    if (userHash != null) {
+      settingsEntries.add("user_hash: '${_escapeJs(userHash!)}'");
+    }
+    if (userName != null) settingsEntries.add("name: '${_escapeJs(userName!)}'");
 
     final intercomSettings = settingsEntries.join(',\n        ');
 
@@ -54,14 +62,12 @@ class IntercomHtmlBuilder {
     // Fallback цвет когда JS-детект не сработал
     final fallbackBg = colorScheme == 'dark' ? '#1a1a1a' : '#ffffff';
 
-    final showJs = autoShow
-        ? '''
+    const showJs = '''
           window.Intercom('show');
           window.Intercom('onShow', function() {
             applyIntercomBg();
             _notifyFlutter('onIntercomReady');
-          });'''
-        : "_notifyFlutter('onSdkLoaded');";
+          });''';
 
     return '''
 <!DOCTYPE html>
@@ -163,7 +169,7 @@ class IntercomHtmlBuilder {
         var s = d.createElement('script');
         s.type = 'text/javascript';
         s.async = true;
-        s.src = 'https://widget.intercom.io/widget/$appId';
+        s.src = 'https://widget.intercom.io/widget/$safeAppId';
         s.onload = function() {
           $showJs
         };
