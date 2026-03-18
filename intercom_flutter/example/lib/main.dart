@@ -1,8 +1,11 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:intercom_flutter_webview/intercom_flutter_webview.dart';
 
 const _appId = 'hc41m06w';
+const _localProxyHost = '127.0.0.1';
+const _localProxyPort = 8080;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +55,13 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _nativeSdkInitialized = false;
   bool _overlayLoading = false;
 
+  ProxyConfig? get _demoProxyConfig {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
+      return null;
+    }
+    return const ProxyConfig(host: _localProxyHost, port: _localProxyPort);
+  }
+
   Future<void> _initNativeSdk() async {
     try {
       await Intercom.instance.initialize(_appId);
@@ -73,7 +83,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openOverlay() async {
     setState(() => _overlayLoading = true);
     try {
-      await IntercomWebViewOverlay.show(context, appId: _appId);
+      await IntercomWebViewOverlay.show(
+        context,
+        appId: _appId,
+        proxyConfig: _demoProxyConfig,
+      );
     } on IntercomLoadException catch (e) {
       if (mounted) _showError('Intercom', e.message);
     } finally {
@@ -143,9 +157,9 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const IntercomWebViewScreen(
+                  builder: (_) => IntercomWebViewScreen(
                     appId: _appId,
-                    // proxyConfig: ProxyConfig(host: '127.0.0.1', port: 8080),
+                    proxyConfig: _demoProxyConfig,
                   ),
                 ),
               );

@@ -10,7 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_inappwebview:
-    path: ../../flutter_inappwebview/flutter_inappwebview
+    git:
+      url: https://github.com/StarProxima/flutter_inappwebview.git
+      ref: feat/windows-proxy-controller
+      path: flutter_inappwebview
   url_launcher: ^6.3.0
 
 dev_dependencies:

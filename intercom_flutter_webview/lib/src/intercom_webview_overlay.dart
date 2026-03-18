@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'intercom_html_builder.dart';
+import 'intercom_local_page_server.dart';
 import 'proxy_config.dart';
 
 /// Исключение при неудачной загрузке Intercom.
@@ -125,6 +127,10 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
   bool _closing = false;
   Timer? _fallbackTimer;
   Color? _intercomBgColor;
+  IntercomLocalPageServer? _pageServer;
+  Uri? _pageUri;
+
+  bool get _useLocalPageMode => Platform.isWindows;
 
   @override
   void initState() {
@@ -134,7 +140,13 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
-    _setupProxy();
+    if (_useLocalPageMode) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_prepareOverlay());
+      });
+    } else {
+      unawaited(_prepareOverlay());
+    }
     _startFallbackTimer();
   }
 
@@ -143,6 +155,7 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
     _slideController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
+    unawaited(_pageServer?.close() ?? Future<void>.value());
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy();
     }
@@ -168,10 +181,27 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
     });
   }
 
-  Future<void> _setupProxy() async {
+  Future<void> _prepareOverlay() async {
     final proxy = widget.proxyConfig;
     if (proxy != null) await proxy.applyProxy();
+    if (_useLocalPageMode) {
+      await _setupLocalPage();
+    }
     if (mounted) setState(() => _proxyReady = true);
+  }
+
+  Future<void> _setupLocalPage() async {
+    final pageServer = await IntercomLocalPageServer.start(
+      html: _buildOverlayHtml(),
+    );
+
+    if (!mounted) {
+      await pageServer.close();
+      return;
+    }
+
+    _pageServer = pageServer;
+    _pageUri = pageServer.entryUri;
   }
 
   void _onIntercomReady() {
@@ -230,7 +260,9 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
 
   @override
   Widget build(BuildContext context) {
-    if (!_proxyReady) return const SizedBox.shrink();
+    if (!_proxyReady || (_useLocalPageMode && _pageUri == null)) {
+      return const SizedBox.shrink();
+    }
 
     return SlideTransition(
       position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
@@ -250,6 +282,9 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
             Positioned.fill(
               child: InAppWebView(
                 key: _webViewKey,
+                initialUrlRequest: _useLocalPageMode
+                    ? URLRequest(url: WebUri(_pageUri.toString()))
+                    : null,
                 initialSettings: _buildSettings(),
                 onWebViewCreated: _onWebViewCreated,
                 onConsoleMessage: (_, msg) {
@@ -267,9 +302,6 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
   }
 
   void _onWebViewCreated(InAppWebViewController controller) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final padding = MediaQuery.of(context).padding;
-
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomHide',
       callback: (_) => _close(),
@@ -295,19 +327,10 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       },
     );
 
-    final html = IntercomHtmlBuilder(
-      appId: widget.appId,
-      userId: widget.userId,
-      email: widget.email,
-      userHash: widget.userHash,
-      userName: widget.userName,
-      colorScheme: isDark ? 'dark' : 'light',
-      topInset: padding.top,
-      bottomInset: padding.bottom,
-    ).build();
+    if (_useLocalPageMode) return;
 
     controller.loadData(
-      data: html,
+      data: _buildOverlayHtml(),
       baseUrl: WebUri('https://app.intercom.io'),
       mimeType: 'text/html',
       encoding: 'utf-8',
@@ -322,6 +345,10 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
     if (uri == null) return NavigationActionPolicy.ALLOW;
 
     final urlString = uri.toString();
+
+    if (_isLoopbackUri(uri)) {
+      return NavigationActionPolicy.ALLOW;
+    }
 
     if (urlString.isEmpty ||
         urlString.startsWith('about:') ||
@@ -352,5 +379,26 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       supportZoom: false,
       transparentBackground: true,
     );
+  }
+
+  String _buildOverlayHtml() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final padding = MediaQuery.of(context).padding;
+
+    return IntercomHtmlBuilder(
+      appId: widget.appId,
+      userId: widget.userId,
+      email: widget.email,
+      userHash: widget.userHash,
+      userName: widget.userName,
+      colorScheme: isDark ? 'dark' : 'light',
+      topInset: padding.top,
+      bottomInset: padding.bottom,
+    ).build();
+  }
+
+  bool _isLoopbackUri(WebUri uri) {
+    final host = uri.host.toLowerCase();
+    return host == '127.0.0.1' || host == 'localhost';
   }
 }
