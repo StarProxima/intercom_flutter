@@ -10,6 +10,11 @@ class IntercomHtmlBuilder {
   final String? userHash;
   final String? userName;
 
+  /// Произвольные атрибуты для Intercom.
+  /// Типы: String (до 255 символов), num, bool.
+  /// Timestamp (int в секундах) форматируется как дата в дашборде.
+  final Map<String, dynamic>? customAttributes;
+
   /// 'light' или 'dark'
   final String colorScheme;
 
@@ -25,6 +30,7 @@ class IntercomHtmlBuilder {
     this.email,
     this.userHash,
     this.userName,
+    this.customAttributes,
     this.colorScheme = 'light',
     this.topInset = 0,
     this.bottomInset = 0,
@@ -53,6 +59,18 @@ class IntercomHtmlBuilder {
       settingsEntries.add("user_hash: '${_escapeJs(userHash!)}'");
     }
     if (userName != null) settingsEntries.add("name: '${_escapeJs(userName!)}'");
+
+    if (customAttributes != null) {
+      for (final entry in customAttributes!.entries) {
+        final key = _escapeJs(entry.key);
+        final value = entry.value;
+        if (value is String) {
+          settingsEntries.add("'$key': '${_escapeJs(value)}'");
+        } else if (value is num || value is bool) {
+          settingsEntries.add("'$key': $value");
+        }
+      }
+    }
 
     final intercomSettings = settingsEntries.join(',\n        ');
 

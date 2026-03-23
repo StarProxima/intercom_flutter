@@ -7,6 +7,14 @@ const _appId = 'hc41m06w';
 const _localProxyHost = '127.0.0.1';
 const _localProxyPort = 8080;
 
+const _proxyConfig = ProxyConfig(
+  host: '195.49.213.205',
+  port: 9000,
+  scheme: 'http',
+  username: 'E2FO2Z1WP3D02HKCLOGAMUBZ',
+  password: 'WE6NW05Y3Y8ZCY1Q407WV9BH',
+);
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const SampleApp());
@@ -138,7 +146,10 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => const IntercomWebViewScreen(appId: _appId),
+                  builder: (_) => const IntercomWebViewScreen(
+                    appId: _appId,
+                    proxyConfig: _proxyConfig,
+                  ),
                 ),
               );
             },

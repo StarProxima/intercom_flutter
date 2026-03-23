@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 /// Конфигурация прокси для WebView.
@@ -14,14 +15,22 @@ class ProxyConfig {
   final String host;
   final int port;
   final String scheme;
+  final String? username;
+  final String? password;
 
   const ProxyConfig({
     required this.host,
     required this.port,
     this.scheme = 'http',
+    this.username,
+    this.password,
   });
 
+  /// URL для ProxyController (без credentials - Android не поддерживает
+  /// user:pass@ в proxy URL). Авторизация через onReceivedHttpAuthRequest.
   String get proxyUrl => '$scheme://$host:$port';
+
+  bool get hasAuth => username != null && password != null;
 
   /// Применяет прокси через ProxyController.
   /// Работает на Android, iOS 17+, macOS 14+, Windows.
@@ -35,14 +44,17 @@ class ProxyConfig {
     }
 
     try {
+      debugPrint('[ProxyConfig] Applying proxy: $host:$port '
+          '(${username != null ? "with auth" : "no auth"})');
       final proxyController = ProxyController.instance();
       final proxySettings = ProxySettings(
         proxyRules: [ProxyRule(url: proxyUrl)],
       );
       await proxyController.setProxyOverride(settings: proxySettings);
+      debugPrint('[ProxyConfig] Proxy applied successfully');
       return true;
-    } catch (_) {
-      // iOS < 17 / macOS < 14: ProxyController недоступен
+    } catch (e) {
+      debugPrint('[ProxyConfig] Failed to apply proxy: $e');
       return false;
     }
   }
@@ -59,8 +71,9 @@ class ProxyConfig {
     try {
       final proxyController = ProxyController.instance();
       await proxyController.clearProxyOverride();
-    } catch (_) {
-      // iOS < 17 / macOS < 14: ProxyController недоступен
+      debugPrint('[ProxyConfig] Proxy cleared');
+    } catch (e) {
+      debugPrint('[ProxyConfig] Failed to clear proxy: $e');
     }
   }
 

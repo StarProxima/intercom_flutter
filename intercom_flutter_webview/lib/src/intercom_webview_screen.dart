@@ -149,6 +149,19 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
               }
               return NavigationActionPolicy.CANCEL;
             },
+            onReceivedHttpAuthRequest: (controller, challenge) async {
+              final proxy = widget.proxyConfig;
+              if (proxy != null && proxy.hasAuth) {
+                debugPrint('[Intercom WebView] Proxy auth request');
+                return HttpAuthResponse(
+                  username: proxy.username!,
+                  password: proxy.password!,
+                  action: HttpAuthResponseAction.PROCEED,
+                  permanentPersistence: true,
+                );
+              }
+              return HttpAuthResponse(action: HttpAuthResponseAction.CANCEL);
+            },
           ),
           if (_isLoading)
             const Center(

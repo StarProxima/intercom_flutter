@@ -19,49 +19,33 @@ class IntercomLoadException implements Exception {
   String toString() => 'IntercomLoadException: $message';
 }
 
-/// Intercom Web Messenger как fullscreen оверлей.
+/// Intercom Web Messenger как fullscreen оверлей с persistent WebView.
 ///
-/// Использует [Overlay] - не блокирует тапы пока Intercom грузится.
-/// WebView прозрачный, Intercom JS сам анимирует свой slide-up при открытии.
+/// WebView создаётся при первом [show] и живёт до явного [destroy].
+/// Повторные вызовы [show] мгновенные - SDK уже загружен.
+/// После первого открытия [onUnreadCountChange] работает фоново.
 ///
-/// - [show] возвращает Future который завершается когда Intercom отобразился.
-///   Бросает [IntercomLoadException] если SDK не загрузился (нет сети, блокировка).
-/// - Автоопределение цвета фона Intercom с fallback на тему.
-/// - Автозакрытие по таймауту если Intercom не загрузился.
-class IntercomWebViewOverlay extends StatefulWidget {
-  final String appId;
-  final String? userId;
-  final String? email;
-  final String? userHash;
-  final String? userName;
-  final ProxyConfig? proxyConfig;
-  final Duration fallbackCloseDelay;
-  final VoidCallback? onReady;
-  final void Function(Object error)? onError;
-  final VoidCallback? onClose;
+/// - [show] - открыть Intercom. Первый вызов грузит SDK, остальные мгновенные.
+/// - [destroy] - уничтожить WebView и освободить память.
+/// - [onUnreadCountChange] - статический callback для отслеживания
+///   непрочитанных разговоров (работает после первого show).
+class IntercomWebViewOverlay {
+  IntercomWebViewOverlay._();
 
-  const IntercomWebViewOverlay({
-    super.key,
-    required this.appId,
-    this.userId,
-    this.email,
-    this.userHash,
-    this.userName,
-    this.proxyConfig,
-    this.fallbackCloseDelay = const Duration(seconds: 12),
-    this.onReady,
-    this.onError,
-    this.onClose,
-  });
+  static _OverlayWidgetState? _state;
+  static OverlayEntry? _entry;
+  static Completer<void>? _readyCompleter;
+
+  /// Callback при изменении количества непрочитанных разговоров.
+  /// Работает после первого вызова [show].
+  static ValueChanged<int>? onUnreadCountChange;
 
   /// Показать Intercom оверлей.
   ///
-  /// Возвращает Future который завершается когда виджет Intercom
-  /// появился на экране. Пока грузится - тапы проходят на экран ниже.
+  /// Первый вызов: создаёт WebView, грузит SDK, показывает Intercom.
+  /// Повторные вызовы: мгновенный `Intercom('show')` через JS.
   ///
-  /// Бросает [IntercomLoadException] если:
-  /// - SDK не загрузился (сеть, блокировка intercomcdn.com)
-  /// - Таймаут загрузки истёк
+  /// Бросает [IntercomLoadException] если SDK не загрузился.
   static Future<void> show(
     BuildContext context, {
     required String appId,
@@ -69,61 +53,91 @@ class IntercomWebViewOverlay extends StatefulWidget {
     String? email,
     String? userHash,
     String? userName,
+    Map<String, dynamic>? customAttributes,
     ProxyConfig? proxyConfig,
     Duration fallbackCloseDelay = const Duration(seconds: 15),
   }) async {
-    final overlay = Overlay.of(context);
-    final readyCompleter = Completer<void>();
+    _readyCompleter = Completer<void>();
 
-    late OverlayEntry entry;
-
-    void removeEntry() {
-      entry.remove();
-      entry.dispose();
+    if (_state != null && _state!.mounted && _state!._sdkLoaded) {
+      _state!._showIntercom();
+      await _readyCompleter!.future;
+      return;
     }
 
-    final overlayWidget = IntercomWebViewOverlay(
+    if (_entry != null) {
+      _entry!.remove();
+      _entry!.dispose();
+    }
+
+    final overlay = Overlay.of(context);
+    final overlayWidget = _OverlayWidget(
       appId: appId,
       userId: userId,
       email: email,
       userHash: userHash,
       userName: userName,
+      customAttributes: customAttributes,
       proxyConfig: proxyConfig,
       fallbackCloseDelay: fallbackCloseDelay,
-      onReady: () {
-        if (!readyCompleter.isCompleted) readyCompleter.complete();
-      },
-      onError: (error) {
-        removeEntry();
-        if (!readyCompleter.isCompleted) {
-          readyCompleter.completeError(error);
-        }
-      },
-      onClose: () {
-        removeEntry();
-        if (!readyCompleter.isCompleted) readyCompleter.complete();
-      },
     );
 
-    entry = OverlayEntry(builder: (_) => overlayWidget);
+    _entry = OverlayEntry(builder: (_) => overlayWidget);
+    overlay.insert(_entry!);
 
-    overlay.insert(entry);
-    await readyCompleter.future;
+    await _readyCompleter!.future;
   }
 
-  @override
-  State<IntercomWebViewOverlay> createState() => _IntercomWebViewOverlayState();
+  /// Уничтожить persistent WebView и освободить память.
+  static void destroy() {
+    _state = null;
+    _entry?.remove();
+    _entry?.dispose();
+    _entry = null;
+    _readyCompleter = null;
+  }
+
+  /// SDK загружен и WebView живой.
+  static bool get isInitialized =>
+      _state != null && _state!.mounted && _state!._sdkLoaded;
 }
 
-class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
+// --- Internal widgets ---
+
+class _OverlayWidget extends StatefulWidget {
+  final String appId;
+  final String? userId;
+  final String? email;
+  final String? userHash;
+  final String? userName;
+  final Map<String, dynamic>? customAttributes;
+  final ProxyConfig? proxyConfig;
+  final Duration fallbackCloseDelay;
+
+  const _OverlayWidget({
+    required this.appId,
+    this.userId,
+    this.email,
+    this.userHash,
+    this.userName,
+    this.customAttributes,
+    this.proxyConfig,
+    this.fallbackCloseDelay = const Duration(seconds: 15),
+  });
+
+  @override
+  State<_OverlayWidget> createState() => _OverlayWidgetState();
+}
+
+class _OverlayWidgetState extends State<_OverlayWidget>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late final AnimationController _slideController;
-
-  // GlobalKey на WebView чтобы iOS не пересоздавала его при rebuild Overlay
   final _webViewKey = GlobalKey();
 
+  InAppWebViewController? _controller;
   bool _proxyReady = false;
-  bool _intercomReady = false;
+  bool _sdkLoaded = false;
+  bool _intercomVisible = false;
   bool _closing = false;
   Timer? _fallbackTimer;
   Color? _intercomBgColor;
@@ -135,6 +149,7 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
   @override
   void initState() {
     super.initState();
+    IntercomWebViewOverlay._state = this;
     WidgetsBinding.instance.addObserver(this);
     _slideController = AnimationController(
       vsync: this,
@@ -152,6 +167,9 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
 
   @override
   void dispose() {
+    if (IntercomWebViewOverlay._state == this) {
+      IntercomWebViewOverlay._state = null;
+    }
     _slideController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
@@ -164,14 +182,17 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
 
   @override
   Future<bool> didPopRoute() async {
-    _close();
-    return true;
+    if (_intercomVisible) {
+      _hide();
+      return true;
+    }
+    return false;
   }
 
   void _startFallbackTimer() {
     _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
-      if (!_intercomReady && mounted && !_closing) {
-        widget.onError?.call(
+      if (!_sdkLoaded && mounted && !_closing) {
+        _completeWithError(
           const IntercomLoadException(
             'Intercom failed to load (timeout). '
             'Check network connection or proxy settings.',
@@ -205,27 +226,64 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
   }
 
   void _onIntercomReady() {
-    if (!mounted || _intercomReady) return;
-    setState(() => _intercomReady = true);
+    if (!mounted) return;
+    _sdkLoaded = true;
     _fallbackTimer?.cancel();
-    widget.onReady?.call();
+    setState(() => _intercomVisible = true);
+    _completeReady();
   }
 
-  void _onIntercomError(String message) {
-    if (!mounted || _intercomReady || _closing) return;
-    _fallbackTimer?.cancel();
-    widget.onError?.call(IntercomLoadException(message));
+  /// Повторное открытие через JS (SDK уже загружен).
+  void _showIntercom() {
+    if (_controller == null) return;
+    setState(() {
+      _intercomVisible = true;
+      _closing = false;
+    });
+    _slideController.value = 0;
+    _controller!.evaluateJavascript(
+      source: '''
+      window.Intercom('show');
+      window.Intercom('onShow', function() {
+        applyIntercomBg();
+        if (window.flutter_inappwebview) {
+          window.flutter_inappwebview.callHandler('onIntercomReady');
+        }
+      });
+    ''',
+    );
   }
 
-  Future<void> _close() async {
-    if (!mounted || _closing) return;
+  /// Скрыть Intercom (не уничтожая WebView).
+  Future<void> _hide() async {
+    if (!mounted || _closing || !_intercomVisible) return;
     _closing = true;
-    await _slideController.forward();
-    widget.onClose?.call();
+    await _slideController.forward(); // slide out
+    if (mounted) {
+      setState(() {
+        _intercomVisible = false;
+        _closing = false;
+      });
+      _slideController.value = 0;
+    }
+    _controller?.evaluateJavascript(source: "window.Intercom('hide');");
+    _completeReady();
+  }
+
+  void _completeReady() {
+    final c = IntercomWebViewOverlay._readyCompleter;
+    if (c != null && !c.isCompleted) c.complete();
+  }
+
+  void _completeWithError(Object error) {
+    final c = IntercomWebViewOverlay._readyCompleter;
+    if (c != null && !c.isCompleted) c.completeError(error);
+    if (mounted) setState(() => _intercomVisible = false);
   }
 
   Color? _parseColor(String css) {
-    final rgbMatch = RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
+    final rgbMatch =
+        RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
     if (rgbMatch != null) {
       return Color.fromARGB(
         255,
@@ -246,8 +304,8 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
     setState(() => _intercomBgColor = color);
     final iconBrightness =
         ThemeData.estimateBrightnessForColor(color) == Brightness.dark
-        ? Brightness.light
-        : Brightness.dark;
+            ? Brightness.light
+            : Brightness.dark;
     SystemChrome.setSystemUIOverlayStyle(
       SystemUiOverlayStyle(
         statusBarColor: color,
@@ -264,6 +322,12 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       return const SizedBox.shrink();
     }
 
+    if (!_intercomVisible && !_closing) {
+      return Offstage(
+        child: SizedBox(width: 1, height: 1, child: _buildWebView()),
+      );
+    }
+
     return SlideTransition(
       position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
           .animate(
@@ -273,27 +337,13 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
             ),
           ),
       child: IgnorePointer(
-        ignoring: !_intercomReady || _closing,
+        ignoring: _closing,
         child: Stack(
           children: [
             Positioned.fill(
               child: ColoredBox(color: _intercomBgColor ?? Colors.transparent),
             ),
-            Positioned.fill(
-              child: InAppWebView(
-                key: _webViewKey,
-                initialUrlRequest: _useLocalPageMode
-                    ? URLRequest(url: WebUri(_pageUri.toString()))
-                    : null,
-                initialSettings: _buildSettings(),
-                onWebViewCreated: _onWebViewCreated,
-                onConsoleMessage: (_, msg) {
-                  debugPrint('[Intercom WebView] ${msg.message}');
-                },
-                shouldOverrideUrlLoading: _handleUrlLoading,
-              ),
-            ),
-            // Стабильный третий child (не менять кол-во children в Stack)
+            Positioned.fill(child: _buildWebView()),
             const SizedBox.shrink(),
           ],
         ),
@@ -301,10 +351,41 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
     );
   }
 
+  Widget _buildWebView() {
+    return InAppWebView(
+      key: _webViewKey,
+      initialUrlRequest: _useLocalPageMode
+          ? URLRequest(url: WebUri(_pageUri.toString()))
+          : null,
+      initialSettings: _buildSettings(),
+      onWebViewCreated: _onWebViewCreated,
+      onConsoleMessage: (_, msg) {
+        debugPrint('[Intercom WebView] ${msg.message}');
+      },
+      shouldOverrideUrlLoading: _handleUrlLoading,
+      onReceivedHttpAuthRequest: (controller, challenge) async {
+        final proxy = widget.proxyConfig;
+        if (proxy != null && proxy.hasAuth) {
+          debugPrint('[Intercom WebView] Proxy auth request from '
+              '${challenge.protectionSpace.host}');
+          return HttpAuthResponse(
+            username: proxy.username!,
+            password: proxy.password!,
+            action: HttpAuthResponseAction.PROCEED,
+            permanentPersistence: true,
+          );
+        }
+        return HttpAuthResponse(action: HttpAuthResponseAction.CANCEL);
+      },
+    );
+  }
+
   void _onWebViewCreated(InAppWebViewController controller) {
+    _controller = controller;
+
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomHide',
-      callback: (_) => _close(),
+      callback: (_) => _hide(),
     );
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomReady',
@@ -323,7 +404,16 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       handlerName: 'onIntercomError',
       callback: (args) {
         final msg = args.isNotEmpty ? args[0] as String : 'Unknown error';
-        _onIntercomError(msg);
+        _completeWithError(IntercomLoadException(msg));
+      },
+    );
+    controller.addJavaScriptHandler(
+      handlerName: 'onUnreadCountChange',
+      callback: (args) {
+        if (args.isNotEmpty) {
+          final count = (args[0] as num?)?.toInt() ?? 0;
+          IntercomWebViewOverlay.onUnreadCountChange?.call(count);
+        }
       },
     );
 
@@ -391,6 +481,7 @@ class _IntercomWebViewOverlayState extends State<IntercomWebViewOverlay>
       email: widget.email,
       userHash: widget.userHash,
       userName: widget.userName,
+      customAttributes: widget.customAttributes,
       colorScheme: isDark ? 'dark' : 'light',
       topInset: padding.top,
       bottomInset: padding.bottom,
