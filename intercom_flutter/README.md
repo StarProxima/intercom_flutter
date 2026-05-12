@@ -5,10 +5,10 @@
 
 Flutter wrapper for Intercom [Android](https://github.com/intercom/intercom-android), [iOS](https://github.com/intercom/intercom-ios), and [Web](https://developers.intercom.com/installing-intercom/docs/basic-javascript) projects.
 
-- Uses Intercom Android SDK Version `17.4.7`.
-- The minimum Android SDK `minSdk` required is 21.
-- The compile Android SDK `compileSdk` required is 35.
-- Uses Intercom iOS SDK Version `19.5.4`.
+- Uses Intercom Android SDK Version `18.1.0`.
+- The minimum Android SDK `minSdk` required is 23.
+- The compile Android SDK `compileSdk` required is 36.
+- Uses Intercom iOS SDK Version `19.5.7`.
 - The minimum iOS target version required is 15.
 - The Xcode version required is 15.
 
@@ -144,11 +144,11 @@ But you can pre-define some Intercom settings, if you want (optional).
 - [ ] unreadConversationCount
 - [ ] setInAppMessagesVisibility
 - [ ] sendTokenToIntercom
-- [ ] handlePushMessage
 - [ ] isIntercomPush
 - [ ] handlePush
 - [ ] displayCarousel
 - [ ] displayHelpCenterCollections
+- [ ] getWindowDidHideStream
 
 ## Using Intercom keys with `--dart-define`
 

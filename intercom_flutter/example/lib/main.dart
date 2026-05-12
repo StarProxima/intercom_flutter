@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
@@ -20,7 +22,6 @@ void main() async {
   runApp(const SampleApp());
 }
 
-class SampleApp extends StatefulWidget {
   const SampleApp({super.key});
 
   @override
@@ -29,6 +30,32 @@ class SampleApp extends StatefulWidget {
 
 class _SampleAppState extends State<SampleApp> {
   ThemeMode _themeMode = ThemeMode.system;
+  StreamSubscription? _windowDidHideSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!kIsWeb) {
+      _windowDidHideSubscription =
+          Intercom.instance.getWindowDidHideStream().listen((_) {
+        // Срабатывает только на iOS, когда нативное окно Intercom закрывается
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Intercom window was closed!'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _windowDidHideSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
