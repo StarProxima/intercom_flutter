@@ -22,6 +22,7 @@ void main() async {
   runApp(const SampleApp());
 }
 
+class SampleApp extends StatefulWidget {
   const SampleApp({super.key});
 
   @override
