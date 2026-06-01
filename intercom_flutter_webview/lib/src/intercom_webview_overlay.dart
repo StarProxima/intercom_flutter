@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -360,14 +361,60 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       initialSettings: _buildSettings(),
       onWebViewCreated: _onWebViewCreated,
       onConsoleMessage: (_, msg) {
-        debugPrint('[Intercom WebView] ${msg.message}');
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] console(${msg.messageLevel}): ${msg.message}',
+          );
+        }
+      },
+      onLoadStart: (_, url) {
+        if (kDebugMode) debugPrint('[Intercom WebView] loadStart: $url');
+      },
+      onLoadStop: (_, url) {
+        if (kDebugMode) debugPrint('[Intercom WebView] loadStop: $url');
+      },
+      onReceivedError: (_, request, error) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] loadError: url=${request.url} '
+            'type=${error.type} desc=${error.description}',
+          );
+        }
+      },
+      onReceivedHttpError: (_, request, errorResponse) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] httpError: url=${request.url} '
+            'status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase}',
+          );
+        }
+      },
+      onReceivedServerTrustAuthRequest: (_, challenge) async {
+        final sslError = challenge.protectionSpace.sslError;
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] serverTrust: host=${challenge.protectionSpace.host}:'
+            '${challenge.protectionSpace.port} sslError=${sslError?.message}',
+          );
+        }
+        // PROCEED только если система валидировала цепочку (sslError == null).
+        // Иначе CANCEL - не доверяем подделанному серверу/прокси.
+        return ServerTrustAuthResponse(
+          action: sslError == null
+              ? ServerTrustAuthResponseAction.PROCEED
+              : ServerTrustAuthResponseAction.CANCEL,
+        );
       },
       shouldOverrideUrlLoading: _handleUrlLoading,
       onReceivedHttpAuthRequest: (controller, challenge) async {
         final proxy = widget.proxyConfig;
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] proxy auth request from '
+            '${challenge.protectionSpace.host}:${challenge.protectionSpace.port}',
+          );
+        }
         if (proxy != null && proxy.hasAuth) {
-          debugPrint('[Intercom WebView] Proxy auth request from '
-              '${challenge.protectionSpace.host}');
           return HttpAuthResponse(
             username: proxy.username!,
             password: proxy.password!,
@@ -463,7 +510,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   InAppWebViewSettings _buildSettings() {
     return InAppWebViewSettings(
       javaScriptEnabled: true,
-      mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+      // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
+      // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
+      mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
       useHybridComposition: true,
       domStorageEnabled: true,
       supportZoom: false,
