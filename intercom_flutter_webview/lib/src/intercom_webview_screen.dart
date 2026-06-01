@@ -122,7 +122,20 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
               }
             },
             onConsoleMessage: (controller, message) {
-              debugPrint('[Intercom WebView] ${message.message}');
+              if (kDebugMode) {
+                debugPrint('[Intercom WebView] ${message.message}');
+              }
+            },
+            onReceivedServerTrustAuthRequest: (controller, challenge) async {
+              // PROCEED только если система валидировала цепочку
+              // (sslError == null). Иначе CANCEL - не доверяем подделанному
+              // серверу/прокси.
+              final sslError = challenge.protectionSpace.sslError;
+              return ServerTrustAuthResponse(
+                action: sslError == null
+                    ? ServerTrustAuthResponseAction.PROCEED
+                    : ServerTrustAuthResponseAction.CANCEL,
+              );
             },
             // Внешние ссылки открываем в системном браузере
             shouldOverrideUrlLoading: (controller, action) async {
@@ -152,7 +165,9 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
             onReceivedHttpAuthRequest: (controller, challenge) async {
               final proxy = widget.proxyConfig;
               if (proxy != null && proxy.hasAuth) {
-                debugPrint('[Intercom WebView] Proxy auth request');
+                if (kDebugMode) {
+                  debugPrint('[Intercom WebView] Proxy auth request');
+                }
                 return HttpAuthResponse(
                   username: proxy.username!,
                   password: proxy.password!,
@@ -175,7 +190,9 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   InAppWebViewSettings _buildSettings() {
     final settings = InAppWebViewSettings(
       javaScriptEnabled: true,
-      mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+      // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
+      // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
+      mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
       useHybridComposition: true,
       domStorageEnabled: true,
       // Дефолтный UA от WebView движка (десктоп подставит десктопный)

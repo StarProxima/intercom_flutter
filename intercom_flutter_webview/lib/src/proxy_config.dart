@@ -44,17 +44,19 @@ class ProxyConfig {
     }
 
     try {
-      debugPrint('[ProxyConfig] Applying proxy: $host:$port '
-          '(${username != null ? "with auth" : "no auth"})');
+      if (kDebugMode) {
+        debugPrint('[ProxyConfig] Applying proxy: $host:$port '
+            '(${username != null ? "with auth" : "no auth"})');
+      }
       final proxyController = ProxyController.instance();
       final proxySettings = ProxySettings(
         proxyRules: [ProxyRule(url: proxyUrl)],
       );
       await proxyController.setProxyOverride(settings: proxySettings);
-      debugPrint('[ProxyConfig] Proxy applied successfully');
+      if (kDebugMode) debugPrint('[ProxyConfig] Proxy applied successfully');
       return true;
     } catch (e) {
-      debugPrint('[ProxyConfig] Failed to apply proxy: $e');
+      if (kDebugMode) debugPrint('[ProxyConfig] Failed to apply proxy: $e');
       return false;
     }
   }
@@ -71,9 +73,9 @@ class ProxyConfig {
     try {
       final proxyController = ProxyController.instance();
       await proxyController.clearProxyOverride();
-      debugPrint('[ProxyConfig] Proxy cleared');
+      if (kDebugMode) debugPrint('[ProxyConfig] Proxy cleared');
     } catch (e) {
-      debugPrint('[ProxyConfig] Failed to clear proxy: $e');
+      if (kDebugMode) debugPrint('[ProxyConfig] Failed to clear proxy: $e');
     }
   }
 
