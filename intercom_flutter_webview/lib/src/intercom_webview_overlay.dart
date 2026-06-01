@@ -41,6 +41,11 @@ class IntercomWebViewOverlay {
   /// Работает после первого вызова [show].
   static ValueChanged<int>? onUnreadCountChange;
 
+  /// Вызывается, когда мессенджер реально отрисован на экране (фрейм появился
+  /// и отрисован), а не просто `onShow`. Хук для аналитики - отсюда приложение
+  /// может слать эвент «виджет поддержки действительно показался».
+  static VoidCallback? onShown;
+
   /// Показать Intercom оверлей.
   ///
   /// Первый вызов: создаёт WebView, грузит SDK, показывает Intercom.
@@ -144,12 +149,9 @@ class _OverlayWidget extends StatefulWidget {
 }
 
 class _OverlayWidgetState extends State<_OverlayWidget>
-    with WidgetsBindingObserver, TickerProviderStateMixin {
-  // Фон фейдится при появлении (transparent -> backgroundColor, 300ms).
-  // Сам WebView появляется без анимации.
-  late final AnimationController _appearController;
-  // Закрытие - дефолтный transition экрана (fade + zoom-out).
-  late final AnimationController _closeController;
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  // Появление мгновенное (controller в 0), закрытие - slide вниз.
+  late final AnimationController _slideController;
   final _webViewKey = GlobalKey();
 
   InAppWebViewController? _controller;
@@ -174,11 +176,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _showStartedAt = DateTime.now();
     IntercomWebViewOverlay._state = this;
     WidgetsBinding.instance.addObserver(this);
-    _appearController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _closeController = AnimationController(
+    _slideController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
@@ -197,8 +195,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     if (IntercomWebViewOverlay._state == this) {
       IntercomWebViewOverlay._state = null;
     }
-    _appearController.dispose();
-    _closeController.dispose();
+    _slideController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
     unawaited(_pageServer?.close() ?? Future<void>.value());
@@ -280,7 +277,6 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     }
     _applySystemChrome();
     setState(() => _intercomVisible = true);
-    _appearController.forward(from: 0);
     _completeReady();
   }
 
@@ -294,8 +290,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       _intercomVisible = true;
       _closing = false;
     });
-    _closeController.value = 0;
-    _appearController.forward(from: 0);
+    _slideController.value = 0;
     // SDK уже загружен с темой из intercomSettings, но при reuse тему дублируем
     // через update - на случай если тема приложения сменилась между показами.
     final themeMode =
@@ -305,9 +300,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       window.Intercom('update', {theme_mode: '$themeMode'});
       window.Intercom('show');
       window.Intercom('onShow', function() {
+        if (window.flutter_inappwebview) {
+          window.flutter_inappwebview.callHandler('onIntercomReady');
+        }
         _whenMessengerPainted(function() {
           if (window.flutter_inappwebview) {
-            window.flutter_inappwebview.callHandler('onIntercomReady');
+            window.flutter_inappwebview.callHandler('onIntercomShown');
           }
         });
       });
@@ -315,19 +313,17 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     );
   }
 
-  /// Скрыть Intercom (не уничтожая WebView). Закрытие проигрывает Cupertino-pop
-  /// slide вправо (см. build).
+  /// Скрыть Intercom (не уничтожая WebView). Закрытие - slide вниз.
   Future<void> _hide() async {
     if (!mounted || _closing || !_intercomVisible) return;
     setState(() => _closing = true);
-    await _closeController.forward(from: 0);
+    await _slideController.forward();
     if (mounted) {
       setState(() {
         _intercomVisible = false;
         _closing = false;
       });
-      _closeController.value = 0;
-      _appearController.value = 0;
+      _slideController.value = 0;
     }
     _controller?.evaluateJavascript(source: "window.Intercom('hide');");
     _completeReady();
@@ -376,49 +372,32 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     }
 
     if (!_intercomVisible && !_closing) {
-      // Греем webview сразу на полный размер (offstage всё равно рендерит
-      // платформенный view, как и при 1x1). Так messenger верстается на
-      // fullscreen ещё до показа - при reveal нет reflow/мигания, и фон не
-      // появляется раньше виджета.
-      final size = MediaQuery.of(context).size;
+      // Греем webview offstage на 1x1: SDK грузится в фоне, чат открывается
+      // мгновенно по готовности.
       return Offstage(
-        child: SizedBox(
-          width: size.width,
-          height: size.height,
-          child: _buildWebView(),
-        ),
+        child: SizedBox(width: 1, height: 1, child: _buildWebView()),
       );
     }
 
-    final content = Stack(
-      children: [
-        Positioned.fill(
-          child: ColoredBox(color: widget.backgroundColor),
+    // Появление мгновенное (controller в 0 = на месте), закрытие - slide вниз
+    // (controller 0->1). Фон backgroundColor сразу под мессенджером.
+    return SlideTransition(
+      position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
+          .animate(
+            CurvedAnimation(parent: _slideController, curve: Curves.easeInCubic),
+          ),
+      child: IgnorePointer(
+        ignoring: _closing,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: ColoredBox(color: widget.backgroundColor),
+            ),
+            Positioned.fill(child: _buildWebView()),
+          ],
         ),
-        Positioned.fill(child: _buildWebView()),
-      ],
+      ),
     );
-
-    if (_closing) {
-      // Закрытие - slide вправо как дефолтный Cupertino-pop (translate
-      // надёжно работает на платформенном webview, в отличие от fade/scale).
-      return IgnorePointer(
-        child: SlideTransition(
-          position: Tween<Offset>(begin: Offset.zero, end: const Offset(1, 0))
-              .animate(
-                CurvedAnimation(
-                  parent: _closeController,
-                  curve: Curves.easeInOut,
-                ),
-              ),
-          child: content,
-        ),
-      );
-    }
-
-    // Появление: без слайда, весь overlay плавно фейдится (messenger уже
-    // отрисован на fullscreen - показывается вместе с фоном, без рассинхрона).
-    return FadeTransition(opacity: _appearController, child: content);
   }
 
   Widget _buildWebView() {
@@ -513,6 +492,16 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomReady',
       callback: (_) => _onIntercomReady(),
+    );
+    controller.addJavaScriptHandler(
+      handlerName: 'onIntercomShown',
+      callback: (_) {
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] onIntercomShown +${_elapsedMs()}ms');
+        }
+        // Виджет реально отрисован - дёргаем хук для аналитики.
+        if (!_showCancelled) IntercomWebViewOverlay.onShown?.call();
+      },
     );
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomError',

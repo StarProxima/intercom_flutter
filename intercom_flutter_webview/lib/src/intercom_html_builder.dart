@@ -86,14 +86,12 @@ class IntercomHtmlBuilder {
     final topPx = topInset.toInt();
     final bottomPx = bottomInset.toInt();
 
-    // onShow срабатывает до фактической отрисовки фрейма мессенджера. Ждём,
-    // пока он реально появится в DOM и отрисуется (2 кадра), и только потом
-    // сигналим во Flutter - иначе фон оверлея показывается раньше виджета.
     const showJs = '''
           window.Intercom('show');
           window.Intercom('onShow', function() {
+            _notifyFlutter('onIntercomReady');
             _whenMessengerPainted(function() {
-              _notifyFlutter('onIntercomReady');
+              _notifyFlutter('onIntercomShown');
             });
           });''';
 
@@ -147,9 +145,9 @@ class IntercomHtmlBuilder {
       }
     }
 
-    // Ждёт, пока фрейм мессенджера появится в DOM и будет отрисован (размер > 0
-    // + 2 кадра), затем вызывает cb. Чтобы Flutter показывал оверлей строго
-    // когда виджет уже виден, а не раньше. Есть таймаут-фоллбэк (~1с).
+    // Ждёт, пока фрейм мессенджера появится и реально отрисуется (size > 0 +
+    // 2 кадра), затем cb. Сигнал «виджет показался» для аналитики (НЕ блокирует
+    // показ - тот идёт по onShow). Таймаут-фоллбэк ~1с.
     function _whenMessengerPainted(cb) {
       var tries = 0;
       var iv = setInterval(function() {
