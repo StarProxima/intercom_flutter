@@ -26,8 +26,10 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  // Тестовый публичный appId Intercom (виден в JS на клиенте, не секрет).
-  final _appId = TextEditingController(text: 'hc41m06w');
+  // Публичный appId Intercom (виден в JS на клиенте, не секрет).
+  final _appId = TextEditingController(text: 'bk580gxm');
+  // origin документа - должен быть в authorized domains workspace Intercom.
+  final _origin = TextEditingController(text: 'https://blancvpn.app');
   final _host = TextEditingController();
   final _port = TextEditingController(text: '443');
   final _scheme = TextEditingController(text: 'https');
@@ -39,7 +41,15 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    for (final c in [_appId, _host, _port, _scheme, _username, _password]) {
+    for (final c in [
+      _appId,
+      _origin,
+      _host,
+      _port,
+      _scheme,
+      _username,
+      _password,
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -69,6 +79,7 @@ class _HomePageState extends State<HomePage> {
       await IntercomWebViewOverlay.show(
         context,
         appId: _appId.text.trim(),
+        baseUrl: _origin.text.trim(),
         proxyConfig: _buildProxy(),
       );
       setState(() => _status = 'Overlay загрузился');
@@ -84,6 +95,7 @@ class _HomePageState extends State<HomePage> {
       MaterialPageRoute<void>(
         builder: (_) => IntercomWebViewScreen(
           appId: _appId.text.trim(),
+          baseUrl: _origin.text.trim(),
           proxyConfig: _buildProxy(),
         ),
       ),
@@ -98,6 +110,7 @@ class _HomePageState extends State<HomePage> {
         padding: const EdgeInsets.all(16),
         children: [
           _field(_appId, 'appId'),
+          _field(_origin, 'origin_url (baseUrl, authorized domain)'),
           _field(_host, 'proxy host (без схемы), пусто = без прокси'),
           _field(_port, 'proxy port'),
           _field(_scheme, 'proxy scheme (http/https)'),
