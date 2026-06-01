@@ -18,6 +18,10 @@ class IntercomWebViewScreen extends StatefulWidget {
   final String? userName;
   final ProxyConfig? proxyConfig;
 
+  /// origin документа WebView - должен быть в authorized domains workspace
+  /// Intercom, иначе messenger/web/ping -> 403 "domain not allowed".
+  final String baseUrl;
+
   const IntercomWebViewScreen({
     super.key,
     required this.appId,
@@ -26,6 +30,7 @@ class IntercomWebViewScreen extends StatefulWidget {
     this.userHash,
     this.userName,
     this.proxyConfig,
+    this.baseUrl = 'https://app.intercom.io',
   });
 
   @override
@@ -112,7 +117,7 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
               // Загружаем HTML с Intercom виджетом
               controller.loadData(
                 data: htmlBuilder.build(),
-                baseUrl: WebUri('https://app.intercom.io'),
+                baseUrl: WebUri(widget.baseUrl),
                 mimeType: 'text/html',
                 encoding: 'utf-8',
               );

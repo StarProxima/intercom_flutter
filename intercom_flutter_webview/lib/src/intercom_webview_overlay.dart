@@ -56,6 +56,9 @@ class IntercomWebViewOverlay {
     String? userName,
     Map<String, dynamic>? customAttributes,
     ProxyConfig? proxyConfig,
+    // origin документа WebView - должен быть в authorized domains workspace
+    // Intercom, иначе messenger/web/ping -> 403 "domain not allowed".
+    String baseUrl = 'https://app.intercom.io',
     Duration fallbackCloseDelay = const Duration(seconds: 15),
   }) async {
     _readyCompleter = Completer<void>();
@@ -80,6 +83,7 @@ class IntercomWebViewOverlay {
       userName: userName,
       customAttributes: customAttributes,
       proxyConfig: proxyConfig,
+      baseUrl: baseUrl,
       fallbackCloseDelay: fallbackCloseDelay,
     );
 
@@ -113,6 +117,7 @@ class _OverlayWidget extends StatefulWidget {
   final String? userName;
   final Map<String, dynamic>? customAttributes;
   final ProxyConfig? proxyConfig;
+  final String baseUrl;
   final Duration fallbackCloseDelay;
 
   const _OverlayWidget({
@@ -123,6 +128,7 @@ class _OverlayWidget extends StatefulWidget {
     this.userName,
     this.customAttributes,
     this.proxyConfig,
+    this.baseUrl = 'https://app.intercom.io',
     this.fallbackCloseDelay = const Duration(seconds: 15),
   });
 
@@ -140,16 +146,22 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   bool _sdkLoaded = false;
   bool _intercomVisible = false;
   bool _closing = false;
+  // Текущий show отменён (таймаут/ошибка). Поздний _onIntercomReady
+  // не должен всплывать поверх caller'а, ушедшего на webapp-fallback.
+  bool _showCancelled = false;
   Timer? _fallbackTimer;
   Color? _intercomBgColor;
   IntercomLocalPageServer? _pageServer;
   Uri? _pageUri;
+  // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
+  DateTime? _showStartedAt;
 
   bool get _useLocalPageMode => Platform.isWindows;
 
   @override
   void initState() {
     super.initState();
+    _showStartedAt = DateTime.now();
     IntercomWebViewOverlay._state = this;
     WidgetsBinding.instance.addObserver(this);
     _slideController = AnimationController(
@@ -226,10 +238,31 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _pageUri = pageServer.entryUri;
   }
 
+  /// Прошло ms с момента старта show (создания виджета).
+  int _elapsedMs() => _showStartedAt == null
+      ? 0
+      : DateTime.now().difference(_showStartedAt!).inMilliseconds;
+
   void _onIntercomReady() {
     if (!mounted) return;
+    // SDK догрузился: запоминаем это и гасим fallback-таймер, чтобы будущий
+    // show шёл по мгновенной ветке - даже если текущий show уже отменён.
     _sdkLoaded = true;
     _fallbackTimer?.cancel();
+    if (kDebugMode) {
+      debugPrint(
+        '[Intercom WebView] onIntercomReady +${_elapsedMs()}ms '
+        '(cancelled=$_showCancelled)',
+      );
+    }
+    // Текущий show отменён (таймаут/ошибка) - caller уже ушёл на webapp.
+    // Тихо догрелись в фоне, но не всплываем: прячем Intercom в JS.
+    if (_showCancelled) {
+      _controller?.evaluateJavascript(
+        source: "window.Intercom('hide');",
+      );
+      return;
+    }
     setState(() => _intercomVisible = true);
     _completeReady();
   }
@@ -237,13 +270,20 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// Повторное открытие через JS (SDK уже загружен).
   void _showIntercom() {
     if (_controller == null) return;
+    // Переоткрытие после отмены прошлого show: снова разрешаем показ виджета.
+    _showCancelled = false;
     setState(() {
       _intercomVisible = true;
       _closing = false;
     });
     _slideController.value = 0;
+    // SDK уже загружен с темой из intercomSettings, но при reuse тему дублируем
+    // через update - на случай если тема приложения сменилась между показами.
+    final themeMode =
+        Theme.of(context).brightness == Brightness.dark ? 'dark' : 'light';
     _controller!.evaluateJavascript(
       source: '''
+      window.Intercom('update', {theme_mode: '$themeMode'});
       window.Intercom('show');
       window.Intercom('onShow', function() {
         applyIntercomBg();
@@ -279,6 +319,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   void _completeWithError(Object error) {
     final c = IntercomWebViewOverlay._readyCompleter;
     if (c != null && !c.isCompleted) c.completeError(error);
+    // Не держим завершённый completer и помечаем show отменённым: поздний
+    // _onIntercomReady не должен всплыть поверх caller'а на webapp-fallback.
+    IntercomWebViewOverlay._readyCompleter = null;
+    _showCancelled = true;
+    // Прячем виджет, но WebView НЕ убиваем - SDK догревается в фоне offstage,
+    // чтобы повторное открытие осталось моментальным.
     if (mounted) setState(() => _intercomVisible = false);
   }
 
@@ -368,15 +414,19 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         }
       },
       onLoadStart: (_, url) {
-        if (kDebugMode) debugPrint('[Intercom WebView] loadStart: $url');
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] +${_elapsedMs()}ms loadStart: $url');
+        }
       },
       onLoadStop: (_, url) {
-        if (kDebugMode) debugPrint('[Intercom WebView] loadStop: $url');
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] +${_elapsedMs()}ms loadStop: $url');
+        }
       },
       onReceivedError: (_, request, error) {
         if (kDebugMode) {
           debugPrint(
-            '[Intercom WebView] loadError: url=${request.url} '
+            '[Intercom WebView] +${_elapsedMs()}ms loadError: url=${request.url} '
             'type=${error.type} desc=${error.description}',
           );
         }
@@ -384,7 +434,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       onReceivedHttpError: (_, request, errorResponse) {
         if (kDebugMode) {
           debugPrint(
-            '[Intercom WebView] httpError: url=${request.url} '
+            '[Intercom WebView] +${_elapsedMs()}ms httpError: url=${request.url} '
             'status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase}',
           );
         }
@@ -393,7 +443,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         final sslError = challenge.protectionSpace.sslError;
         if (kDebugMode) {
           debugPrint(
-            '[Intercom WebView] serverTrust: host=${challenge.protectionSpace.host}:'
+            '[Intercom WebView] +${_elapsedMs()}ms serverTrust: '
+            'host=${challenge.protectionSpace.host}:'
             '${challenge.protectionSpace.port} sslError=${sslError?.message}',
           );
         }
@@ -409,8 +460,10 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       onReceivedHttpAuthRequest: (controller, challenge) async {
         final proxy = widget.proxyConfig;
         if (kDebugMode) {
+          // Каждый CONNECT-туннель прокси к домену Intercom бьёт сюда -
+          // по этим строкам видно водопад подключений и его тайминги.
           debugPrint(
-            '[Intercom WebView] proxy auth request from '
+            '[Intercom WebView] +${_elapsedMs()}ms proxy auth request from '
             '${challenge.protectionSpace.host}:${challenge.protectionSpace.port}',
           );
         }
@@ -468,7 +521,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
     controller.loadData(
       data: _buildOverlayHtml(),
-      baseUrl: WebUri('https://app.intercom.io'),
+      baseUrl: WebUri(widget.baseUrl),
       mimeType: 'text/html',
       encoding: 'utf-8',
     );

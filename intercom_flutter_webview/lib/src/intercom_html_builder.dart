@@ -51,6 +51,9 @@ class IntercomHtmlBuilder {
     final settingsEntries = <String>[
       "app_id: '$safeAppId'",
       'hide_default_launcher: true',
+      // Тема мессенджера - официальный Intercom JS-параметр (light|dark|system).
+      // Сработает только если в дашборде workspace настроена тёмная палитра.
+      "theme_mode: '$colorScheme'",
     ];
 
     if (userId != null) settingsEntries.add("user_id: '${_escapeJs(userId!)}'");
@@ -94,6 +97,12 @@ class IntercomHtmlBuilder {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Support</title>
+  <!-- Прогреваем CONNECT-туннели к доменам Intercom заранее и параллельно,
+       чтобы не ждать последовательный водопад подключений при загрузке SDK. -->
+  <link rel="preconnect" href="https://widget.intercom.io" crossorigin>
+  <link rel="preconnect" href="https://js.intercomcdn.com" crossorigin>
+  <link rel="preconnect" href="https://downloads.intercomcdn.com" crossorigin>
+  <link rel="dns-prefetch" href="https://api-iam.intercom.io">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -189,9 +198,13 @@ class IntercomHtmlBuilder {
         s.async = true;
         s.src = 'https://widget.intercom.io/widget/$safeAppId';
         s.onload = function() {
+          // Момент реальной загрузки loader-скрипта widget.intercom.io.
+          // Уходит в onConsoleMessage - видно, сколько заняла сеть до JS.
+          console.log('[Intercom HTML] loader onload ' + performance.now());
           $showJs
         };
         s.onerror = function() {
+          console.log('[Intercom HTML] loader onerror ' + performance.now());
           _notifyFlutter('onIntercomError',
             'Failed to load Intercom SDK from intercomcdn.com. ' +
             'Check network connection or proxy settings.');
