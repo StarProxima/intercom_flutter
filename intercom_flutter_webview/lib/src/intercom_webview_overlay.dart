@@ -305,17 +305,18 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       window.Intercom('update', {theme_mode: '$themeMode'});
       window.Intercom('show');
       window.Intercom('onShow', function() {
-        applyIntercomBg();
-        if (window.flutter_inappwebview) {
-          window.flutter_inappwebview.callHandler('onIntercomReady');
-        }
+        _whenMessengerPainted(function() {
+          if (window.flutter_inappwebview) {
+            window.flutter_inappwebview.callHandler('onIntercomReady');
+          }
+        });
       });
     ''',
     );
   }
 
-  /// Скрыть Intercom (не уничтожая WebView). Закрытие проигрывает дефолтный
-  /// transition экрана (fade + zoom-out, см. build).
+  /// Скрыть Intercom (не уничтожая WebView). Закрытие проигрывает Cupertino-pop
+  /// slide вправо (см. build).
   Future<void> _hide() async {
     if (!mounted || _closing || !_intercomVisible) return;
     setState(() => _closing = true);
@@ -375,8 +376,17 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     }
 
     if (!_intercomVisible && !_closing) {
+      // Греем webview сразу на полный размер (offstage всё равно рендерит
+      // платформенный view, как и при 1x1). Так messenger верстается на
+      // fullscreen ещё до показа - при reveal нет reflow/мигания, и фон не
+      // появляется раньше виджета.
+      final size = MediaQuery.of(context).size;
       return Offstage(
-        child: SizedBox(width: 1, height: 1, child: _buildWebView()),
+        child: SizedBox(
+          width: size.width,
+          height: size.height,
+          child: _buildWebView(),
+        ),
       );
     }
 
@@ -390,25 +400,24 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     );
 
     if (_closing) {
-      // Дефолтный transition экрана при закрытии: fade + лёгкий zoom-out.
-      final out = CurvedAnimation(
-        parent: _closeController,
-        curve: Curves.easeInCubic,
-      );
-
+      // Закрытие - slide вправо как дефолтный Cupertino-pop (translate
+      // надёжно работает на платформенном webview, в отличие от fade/scale).
       return IgnorePointer(
-        child: FadeTransition(
-          opacity: ReverseAnimation(out),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 1, end: 1.06).animate(out),
-            child: content,
-          ),
+        child: SlideTransition(
+          position: Tween<Offset>(begin: Offset.zero, end: const Offset(1, 0))
+              .animate(
+                CurvedAnimation(
+                  parent: _closeController,
+                  curve: Curves.easeInOut,
+                ),
+              ),
+          child: content,
         ),
       );
     }
 
-    // Появление: без слайда, весь overlay плавно фейдится transparent ->
-    // backgroundColor (300ms). Сам виджет своей анимации появления не имеет.
+    // Появление: без слайда, весь overlay плавно фейдится (messenger уже
+    // отрисован на fullscreen - показывается вместе с фоном, без рассинхрона).
     return FadeTransition(opacity: _appearController, child: content);
   }
 
