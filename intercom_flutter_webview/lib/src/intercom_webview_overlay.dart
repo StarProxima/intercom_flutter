@@ -59,6 +59,10 @@ class IntercomWebViewOverlay {
     // origin документа WebView - должен быть в authorized domains workspace
     // Intercom, иначе messenger/web/ping -> 403 "domain not allowed".
     String baseUrl = 'https://app.intercom.io',
+    // Фон под мессенджером - ставится сразу, без вспышки белого на первых
+    // заходах. Конкретный цвет под тему workspace задаёт приложение (тут только
+    // нейтральный fallback - пакет не знает палитру воркспейса).
+    Color backgroundColor = const Color(0xFF000000),
     Duration fallbackCloseDelay = const Duration(seconds: 15),
   }) async {
     _readyCompleter = Completer<void>();
@@ -84,6 +88,7 @@ class IntercomWebViewOverlay {
       customAttributes: customAttributes,
       proxyConfig: proxyConfig,
       baseUrl: baseUrl,
+      backgroundColor: backgroundColor,
       fallbackCloseDelay: fallbackCloseDelay,
     );
 
@@ -118,6 +123,7 @@ class _OverlayWidget extends StatefulWidget {
   final Map<String, dynamic>? customAttributes;
   final ProxyConfig? proxyConfig;
   final String baseUrl;
+  final Color backgroundColor;
   final Duration fallbackCloseDelay;
 
   const _OverlayWidget({
@@ -129,6 +135,7 @@ class _OverlayWidget extends StatefulWidget {
     this.customAttributes,
     this.proxyConfig,
     this.baseUrl = 'https://app.intercom.io',
+    this.backgroundColor = const Color(0xFF000000),
     this.fallbackCloseDelay = const Duration(seconds: 15),
   });
 
@@ -137,8 +144,12 @@ class _OverlayWidget extends StatefulWidget {
 }
 
 class _OverlayWidgetState extends State<_OverlayWidget>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  late final AnimationController _slideController;
+    with WidgetsBindingObserver, TickerProviderStateMixin {
+  // Фон фейдится при появлении (transparent -> backgroundColor, 300ms).
+  // Сам WebView появляется без анимации.
+  late final AnimationController _appearController;
+  // Закрытие - дефолтный transition экрана (fade + zoom-out).
+  late final AnimationController _closeController;
   final _webViewKey = GlobalKey();
 
   InAppWebViewController? _controller;
@@ -150,7 +161,6 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // не должен всплывать поверх caller'а, ушедшего на webapp-fallback.
   bool _showCancelled = false;
   Timer? _fallbackTimer;
-  Color? _intercomBgColor;
   IntercomLocalPageServer? _pageServer;
   Uri? _pageUri;
   // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
@@ -164,7 +174,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _showStartedAt = DateTime.now();
     IntercomWebViewOverlay._state = this;
     WidgetsBinding.instance.addObserver(this);
-    _slideController = AnimationController(
+    _appearController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _closeController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
@@ -183,7 +197,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     if (IntercomWebViewOverlay._state == this) {
       IntercomWebViewOverlay._state = null;
     }
-    _slideController.dispose();
+    _appearController.dispose();
+    _closeController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
     unawaited(_pageServer?.close() ?? Future<void>.value());
@@ -263,7 +278,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       );
       return;
     }
+    _applySystemChrome();
     setState(() => _intercomVisible = true);
+    _appearController.forward(from: 0);
     _completeReady();
   }
 
@@ -272,11 +289,13 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     if (_controller == null) return;
     // Переоткрытие после отмены прошлого show: снова разрешаем показ виджета.
     _showCancelled = false;
+    _applySystemChrome();
     setState(() {
       _intercomVisible = true;
       _closing = false;
     });
-    _slideController.value = 0;
+    _closeController.value = 0;
+    _appearController.forward(from: 0);
     // SDK уже загружен с темой из intercomSettings, но при reuse тему дублируем
     // через update - на случай если тема приложения сменилась между показами.
     final themeMode =
@@ -295,17 +314,19 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     );
   }
 
-  /// Скрыть Intercom (не уничтожая WebView).
+  /// Скрыть Intercom (не уничтожая WebView). Закрытие проигрывает дефолтный
+  /// transition экрана (fade + zoom-out, см. build).
   Future<void> _hide() async {
     if (!mounted || _closing || !_intercomVisible) return;
-    _closing = true;
-    await _slideController.forward(); // slide out
+    setState(() => _closing = true);
+    await _closeController.forward(from: 0);
     if (mounted) {
       setState(() {
         _intercomVisible = false;
         _closing = false;
       });
-      _slideController.value = 0;
+      _closeController.value = 0;
+      _appearController.value = 0;
     }
     _controller?.evaluateJavascript(source: "window.Intercom('hide');");
     _completeReady();
@@ -328,27 +349,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     if (mounted) setState(() => _intercomVisible = false);
   }
 
-  Color? _parseColor(String css) {
-    final rgbMatch =
-        RegExp(r'rgba?\((\d+),\s*(\d+),\s*(\d+)').firstMatch(css);
-    if (rgbMatch != null) {
-      return Color.fromARGB(
-        255,
-        int.parse(rgbMatch.group(1)!),
-        int.parse(rgbMatch.group(2)!),
-        int.parse(rgbMatch.group(3)!),
-      );
-    }
-    if (css.startsWith('#') && css.length == 7) {
-      final hex = int.tryParse(css.substring(1), radix: 16);
-      if (hex != null) return Color(0xFF000000 | hex);
-    }
-    return null;
-  }
-
-  void _applyBgColor(Color color) {
-    if (!mounted) return;
-    setState(() => _intercomBgColor = color);
+  /// Красит статус/нав-бар под фон чата. Цвет фиксированный (widget.backgroundColor),
+  /// поэтому ставим сразу - без чтения реального фона мессенджера (оно ловило
+  /// белый фрейм на первых заходах -> вспышка).
+  void _applySystemChrome() {
+    final color = widget.backgroundColor;
     final iconBrightness =
         ThemeData.estimateBrightnessForColor(color) == Brightness.dark
             ? Brightness.light
@@ -375,27 +380,36 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       );
     }
 
-    return SlideTransition(
-      position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
-          .animate(
-            CurvedAnimation(
-              parent: _slideController,
-              curve: Curves.easeInCubic,
-            ),
-          ),
-      child: IgnorePointer(
-        ignoring: _closing,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: ColoredBox(color: _intercomBgColor ?? Colors.transparent),
-            ),
-            Positioned.fill(child: _buildWebView()),
-            const SizedBox.shrink(),
-          ],
+    final content = Stack(
+      children: [
+        Positioned.fill(
+          child: ColoredBox(color: widget.backgroundColor),
         ),
-      ),
+        Positioned.fill(child: _buildWebView()),
+      ],
     );
+
+    if (_closing) {
+      // Дефолтный transition экрана при закрытии: fade + лёгкий zoom-out.
+      final out = CurvedAnimation(
+        parent: _closeController,
+        curve: Curves.easeInCubic,
+      );
+
+      return IgnorePointer(
+        child: FadeTransition(
+          opacity: ReverseAnimation(out),
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 1, end: 1.06).animate(out),
+            child: content,
+          ),
+        ),
+      );
+    }
+
+    // Появление: без слайда, весь overlay плавно фейдится transparent ->
+    // backgroundColor (300ms). Сам виджет своей анимации появления не имеет.
+    return FadeTransition(opacity: _appearController, child: content);
   }
 
   Widget _buildWebView() {
@@ -492,15 +506,6 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       callback: (_) => _onIntercomReady(),
     );
     controller.addJavaScriptHandler(
-      handlerName: 'onIntercomColor',
-      callback: (args) {
-        if (args.isNotEmpty && mounted) {
-          final color = _parseColor(args[0] as String);
-          if (color != null) _applyBgColor(color);
-        }
-      },
-    );
-    controller.addJavaScriptHandler(
       handlerName: 'onIntercomError',
       callback: (args) {
         final msg = args.isNotEmpty ? args[0] as String : 'Unknown error';
@@ -576,6 +581,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   String _buildOverlayHtml() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final padding = MediaQuery.of(context).padding;
+    final argb = widget.backgroundColor.toARGB32();
+    final bgCss = '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 
     return IntercomHtmlBuilder(
       appId: widget.appId,
@@ -585,6 +592,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       userName: widget.userName,
       customAttributes: widget.customAttributes,
       colorScheme: isDark ? 'dark' : 'light',
+      backgroundColorCss: bgCss,
       topInset: padding.top,
       bottomInset: padding.bottom,
     ).build();

@@ -22,6 +22,9 @@ class IntercomWebViewScreen extends StatefulWidget {
   /// Intercom, иначе messenger/web/ping -> 403 "domain not allowed".
   final String baseUrl;
 
+  /// Фон под мессенджером (совпадает с тёмным фоном виджета Intercom).
+  final Color backgroundColor;
+
   const IntercomWebViewScreen({
     super.key,
     required this.appId,
@@ -31,6 +34,7 @@ class IntercomWebViewScreen extends StatefulWidget {
     this.userName,
     this.proxyConfig,
     this.baseUrl = 'https://app.intercom.io',
+    this.backgroundColor = const Color(0xFF000000),
   });
 
   @override
@@ -84,6 +88,9 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
 
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
+    final argb = widget.backgroundColor.toARGB32();
+    final bgCss = '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+
     final htmlBuilder = IntercomHtmlBuilder(
       appId: widget.appId,
       userId: widget.userId,
@@ -91,9 +98,11 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
       userHash: widget.userHash,
       userName: widget.userName,
       colorScheme: isDark ? 'dark' : 'light',
+      backgroundColorCss: bgCss,
     );
 
     return Scaffold(
+      backgroundColor: widget.backgroundColor,
       appBar: AppBar(
         title: const Text('Support'),
         leading: IconButton(

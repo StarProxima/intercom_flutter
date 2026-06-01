@@ -18,6 +18,11 @@ class IntercomHtmlBuilder {
   /// 'light' или 'dark'
   final String colorScheme;
 
+  /// CSS-цвет фона страницы (под мессенджером). Ставится сразу, до загрузки
+  /// Intercom - чтобы не было вспышки белого фрейма мессенджера на первых
+  /// заходах (фон совпадает с тёмным фоном виджета).
+  final String backgroundColorCss;
+
   /// Отступ сверху в пикселях (для status bar).
   final double topInset;
 
@@ -32,6 +37,7 @@ class IntercomHtmlBuilder {
     this.userName,
     this.customAttributes,
     this.colorScheme = 'light',
+    this.backgroundColorCss = '#000000',
     this.topInset = 0,
     this.bottomInset = 0,
   });
@@ -80,13 +86,9 @@ class IntercomHtmlBuilder {
     final topPx = topInset.toInt();
     final bottomPx = bottomInset.toInt();
 
-    // Fallback цвет когда JS-детект не сработал
-    final fallbackBg = colorScheme == 'dark' ? '#1a1a1a' : '#ffffff';
-
     const showJs = '''
           window.Intercom('show');
           window.Intercom('onShow', function() {
-            applyIntercomBg();
             _notifyFlutter('onIntercomReady');
           });''';
 
@@ -106,7 +108,7 @@ class IntercomHtmlBuilder {
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
-      background: transparent;
+      background: $backgroundColorCss;
       width: 100%;
       height: 100%;
     }
@@ -138,46 +140,6 @@ class IntercomHtmlBuilder {
       if (window.flutter_inappwebview) {
         window.flutter_inappwebview.callHandler(handler, data);
       }
-    }
-
-    // Определяет background-color из Intercom контейнерных элементов.
-    // Стратегия: сканируем все intercom-элементы в нашем DOM,
-    // ищем первый с не-прозрачным background.
-    function detectIntercomBg() {
-      var els = document.querySelectorAll(
-        '#intercom-container, #intercom-frame, ' +
-        '.intercom-messenger-frame, [class*="intercom"]'
-      );
-      for (var i = 0; i < els.length; i++) {
-        var bg = getComputedStyle(els[i]).backgroundColor;
-        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
-          return bg;
-        }
-      }
-      return null;
-    }
-
-    function applyIntercomBg() {
-      var attempts = 0;
-      var applied = false;
-      var interval = setInterval(function() {
-        if (applied) { clearInterval(interval); return; }
-        var bg = detectIntercomBg();
-        if (bg) {
-          document.body.style.background = bg;
-          _notifyFlutter('onIntercomColor', bg);
-          applied = true;
-          clearInterval(interval);
-        }
-        if (++attempts > 30) {
-          clearInterval(interval);
-          // Fallback - используем цвет на основе темы
-          if (!applied) {
-            document.body.style.background = '$fallbackBg';
-            _notifyFlutter('onIntercomColor', '$fallbackBg');
-          }
-        }
-      }, 150);
     }
 
     (function() {
