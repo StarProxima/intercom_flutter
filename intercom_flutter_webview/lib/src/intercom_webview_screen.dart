@@ -44,6 +44,7 @@ class IntercomWebViewScreen extends StatefulWidget {
 class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   bool _isLoading = true;
   bool _proxyReady = false;
+  bool _proxyFailed = false;
 
   @override
   void initState() {
@@ -54,7 +55,13 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   Future<void> _setupProxy() async {
     final proxy = widget.proxyConfig;
     if (proxy != null) {
-      await proxy.applyProxy();
+      final applied = await proxy.applyProxy();
+      // Прокси не встал - не грузим вебвью напрямую (тихий обход), показываем ошибку.
+      if (!applied) {
+        if (mounted) setState(() => _proxyFailed = true);
+
+        return;
+      }
     }
     if (mounted) {
       setState(() => _proxyReady = true);
@@ -71,6 +78,19 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_proxyFailed) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Support'),
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        body: const Center(child: Text('Не удалось применить прокси')),
+      );
+    }
+
     // Ждём применения прокси перед созданием WebView -
     // на Windows прокси инжектится в browser args при создании environment
     if (!_proxyReady) {
@@ -141,18 +161,50 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
                 debugPrint('[Intercom WebView] ${message.message}');
               }
             },
+            onLoadStart: (_, url) {
+              if (kDebugMode) {
+                debugPrint('[Intercom WebView] loadStart: $url');
+              }
+            },
+            onReceivedError: (_, request, error) {
+              if (kDebugMode) {
+                debugPrint(
+                  '[Intercom WebView] loadError: url=${request.url} '
+                  'type=${error.type} desc=${error.description}',
+                );
+              }
+            },
+            onReceivedHttpError: (_, request, errorResponse) {
+              if (kDebugMode) {
+                debugPrint(
+                  '[Intercom WebView] httpError: url=${request.url} '
+                  'status=${errorResponse.statusCode}',
+                );
+              }
+            },
             onReceivedServerTrustAuthRequest: (controller, challenge) async {
-              // PROCEED только если система валидировала цепочку
-              // (sslError == null). Иначе CANCEL - не доверяем подделанному
-              // серверу/прокси.
               final sslError = challenge.protectionSpace.sslError;
+              if (kDebugMode) {
+                debugPrint(
+                  '[Intercom WebView] serverTrust: '
+                  '${challenge.protectionSpace.host}:'
+                  '${challenge.protectionSpace.port} sslError=$sslError',
+                );
+              }
+              // iOS для валидного серта отдаёт UNSPECIFIED (успех), Android - null.
+              // PROCEED на оба; иначе CANCEL. Без UNSPECIFIED на iOS рубились все
+              // https-загрузки. См. подробный коммент в intercom_webview_overlay.
+              final trusted =
+                  sslError == null || sslError.code == SslErrorType.UNSPECIFIED;
+
               return ServerTrustAuthResponse(
-                action: sslError == null
+                action: trusted
                     ? ServerTrustAuthResponseAction.PROCEED
                     : ServerTrustAuthResponseAction.CANCEL,
               );
             },
-            // Внешние ссылки открываем в системном браузере
+            // В браузер уводим только явные клики по ссылкам (см. оверлей):
+            // иначе на iOS initial loadData с baseUrl=origin улетает в Safari.
             shouldOverrideUrlLoading: (controller, action) async {
               final uri = action.request.url;
               if (uri == null) {
@@ -160,14 +212,23 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
               }
 
               final urlString = uri.toString();
-              // Разрешаем загрузку Intercom ресурсов
+              if (kDebugMode) {
+                debugPrint(
+                  '[Intercom WebView] urlLoading: type=${action.navigationType} '
+                  'mainFrame=${action.isForMainFrame} url=$urlString',
+                );
+              }
+
+              if (action.navigationType != NavigationType.LINK_ACTIVATED) {
+                return NavigationActionPolicy.ALLOW;
+              }
+
               if (urlString.contains('intercom.io') ||
                   urlString.startsWith('about:') ||
                   urlString.startsWith('data:')) {
                 return NavigationActionPolicy.ALLOW;
               }
 
-              // Все остальные ссылки - в системный браузер
               final launchUri = Uri.tryParse(urlString);
               if (launchUri != null) {
                 await launchUrl(

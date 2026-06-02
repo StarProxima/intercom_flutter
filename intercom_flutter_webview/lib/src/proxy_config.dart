@@ -26,15 +26,20 @@ class ProxyConfig {
     this.password,
   });
 
-  /// URL для ProxyController (без credentials - Android не поддерживает
-  /// user:pass@ в proxy URL). Авторизация через onReceivedHttpAuthRequest.
+  /// URL для ProxyController без credentials: Android/Windows не принимают
+  /// user:pass@ в proxy URL (там авторизация идёт через onReceivedHttpAuthRequest).
+  /// На iOS/macOS креды кладутся прямо в [ProxyRule] - см. [_buildSettings].
   String get proxyUrl => '$scheme://$host:$port';
 
   bool get hasAuth => username != null && password != null;
 
   /// Применяет прокси через ProxyController.
   /// Работает на Android, iOS 17+, macOS 14+, Windows.
-  /// На iOS < 17 / macOS < 14 вернёт false (API недоступен).
+  ///
+  /// Возвращает false, если прокси применить не удалось: платформа без поддержки
+  /// (iOS < 17 / macOS < 14), нет WebView-фичи PROXY_OVERRIDE, либо нативная
+  /// ошибка. Caller ОБЯЗАН проверить результат - при false прокси не встал и
+  /// грузить контент напрямую нельзя (иначе тихий обход прокси).
   Future<bool> applyProxy() async {
     if (!Platform.isAndroid &&
         !Platform.isIOS &&
@@ -46,19 +51,28 @@ class ProxyConfig {
     try {
       if (kDebugMode) {
         debugPrint('[ProxyConfig] Applying proxy: $host:$port '
-            '(${username != null ? "with auth" : "no auth"})');
+            '(${hasAuth ? "with auth" : "no auth"})');
       }
       final proxyController = ProxyController.instance();
-      final proxySettings = ProxySettings(
-        proxyRules: [ProxyRule(url: proxyUrl)],
-      );
-      await proxyController.setProxyOverride(settings: proxySettings);
+      await proxyController.setProxyOverride(settings: _buildSettings());
       if (kDebugMode) debugPrint('[ProxyConfig] Proxy applied successfully');
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('[ProxyConfig] Failed to apply proxy: $e');
       return false;
     }
+  }
+
+  // iOS/macOS принимают креды прямо в ProxyRule (нативно applyCredential), и это
+  // единственный путь авторизации на них. Android/Windows их в ProxyRule
+  // игнорируют - там 407 от прокси разруливает onReceivedHttpAuthRequest.
+  ProxySettings _buildSettings() {
+    final useRuleCredentials = hasAuth && (Platform.isIOS || Platform.isMacOS);
+    final rule = useRuleCredentials
+        ? ProxyRule(url: proxyUrl, username: username, password: password)
+        : ProxyRule(url: proxyUrl);
+
+    return ProxySettings(proxyRules: [rule]);
   }
 
   /// Сброс прокси.

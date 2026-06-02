@@ -296,7 +296,21 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   Future<void> _prepareOverlay() async {
     final proxy = widget.proxyConfig;
-    if (proxy != null) await proxy.applyProxy();
+    if (proxy != null) {
+      final applied = await proxy.applyProxy();
+      // Прокси не встал - грузить Intercom напрямую нельзя (тихий обход прокси).
+      // Рвём show с ошибкой: caller уйдёт на webapp-fallback, а вебвью так и не
+      // монтируется (build ждёт _proxyReady), прямого коннекта не будет.
+      if (!applied) {
+        _completeWithError(
+          const IntercomLoadException(
+            'Failed to apply proxy. Check proxy settings or platform support.',
+          ),
+        );
+
+        return;
+      }
+    }
     if (_useLocalPageMode) {
       await _setupLocalPage();
     }
@@ -718,10 +732,17 @@ class _IntercomWebView extends StatelessWidget {
             '${challenge.protectionSpace.port} sslError=${sslError?.message}',
           );
         }
-        // PROCEED только если система валидировала цепочку (sslError == null).
-        // Иначе CANCEL - не доверяем подделанному серверу/прокси.
+        // iOS для валидного системно-доверенного серта отдаёт не null, а
+        // UNSPECIFIED (kSecTrustResultUnspecified: «оценка успешна, серт
+        // доверенный») - это успех. Android для валидных даёт null. PROCEED в
+        // обоих успешных случаях; иначе (expired/untrusted/mismatch/...) CANCEL -
+        // не доверяем подделанному серверу/прокси. Без UNSPECIFIED на iOS
+        // рубились ВСЕ https-загрузки (скрипты Intercom) -> чат не открывался.
+        final trusted =
+            sslError == null || sslError.code == SslErrorType.UNSPECIFIED;
+
         return ServerTrustAuthResponse(
-          action: sslError == null
+          action: trusted
               ? ServerTrustAuthResponseAction.PROCEED
               : ServerTrustAuthResponseAction.CANCEL,
         );
@@ -759,17 +780,27 @@ class _IntercomWebView extends StatelessWidget {
 
     final urlString = uri.toString();
 
-    if (_isLoopbackUri(uri)) {
+    if (kDebugMode) {
+      debugPrint(
+        '[Intercom WebView] urlLoading: type=${action.navigationType} '
+        'mainFrame=${action.isForMainFrame} url=$urlString',
+      );
+    }
+
+    // В системный браузер уводим ТОЛЬКО явные клики юзера по ссылкам в чате.
+    // Всё остальное (initial-загрузка документа через loadData с baseUrl=origin,
+    // редиректы и навигации самого Intercom) грузим в вебвью. Иначе на iOS
+    // loadData с baseUrl триггерит этот колбэк на саму data-навигацию: origin
+    // (не *.intercom.io) улетает в Safari, навигация отменяется и вебвью пустой.
+    // На Android loadDataWithBaseURL этот колбэк на initial-load не дёргает.
+    if (action.navigationType != NavigationType.LINK_ACTIVATED) {
       return NavigationActionPolicy.ALLOW;
     }
 
-    if (urlString.isEmpty ||
+    if (_isLoopbackUri(uri) ||
         urlString.startsWith('about:') ||
-        urlString.startsWith('data:')) {
-      return NavigationActionPolicy.ALLOW;
-    }
-
-    if (urlString.contains('intercom.io') ||
+        urlString.startsWith('data:') ||
+        urlString.contains('intercom.io') ||
         urlString.contains('intercomcdn.com') ||
         urlString.contains('intercomassets.com') ||
         urlString.contains('intercom-messenger.com')) {
