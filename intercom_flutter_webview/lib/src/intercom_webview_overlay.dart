@@ -554,15 +554,27 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                   Positioned.fill(
                     child: ColoredBox(color: widget.backgroundColor),
                   ),
+                  // Оверлей не Scaffold, поэтому сам под клавиатуру не ужимается,
+                  // а вебвью фуллскрин. На iOS клавиатура оверлеит контент
+                  // (WKWebView не двигает инпут, composer уходит под клаву); на
+                  // Android нативный WebView сам скроллит контент, утягивая хедер
+                  // вверх. Ужимаем вебвью снизу на высоту клавиатуры: фрейм
+                  // уменьшается -> инпут встаёт над клавой, хедер остаётся на месте.
+                  // Двойного инсета нет - резайзит только этот Padding.
                   Positioned.fill(
-                    child: _IntercomWebView(
-                      webViewKey: _webViewKey,
-                      initialUrlRequest: _useLocalPageMode
-                          ? URLRequest(url: WebUri(_pageUri.toString()))
-                          : null,
-                      proxyConfig: widget.proxyConfig,
-                      onCreated: _onWebViewCreated,
-                      elapsedMs: _elapsedMs,
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        bottom: MediaQuery.viewInsetsOf(context).bottom,
+                      ),
+                      child: _IntercomWebView(
+                        webViewKey: _webViewKey,
+                        initialUrlRequest: _useLocalPageMode
+                            ? URLRequest(url: WebUri(_pageUri.toString()))
+                            : null,
+                        proxyConfig: widget.proxyConfig,
+                        onCreated: _onWebViewCreated,
+                        elapsedMs: _elapsedMs,
+                      ),
                     ),
                   ),
                 ],
