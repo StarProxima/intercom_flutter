@@ -20,6 +20,18 @@ class IntercomLoadException implements Exception {
   String toString() => 'IntercomLoadException: $message';
 }
 
+/// Строит заглушку поверх вебвью на момент показа. [reveal] - прогресс раскрытия
+/// (0 - закрыто, 1 - на весь экран), [fade] - кросс-фейд контента (0 - прозрачно,
+/// виден вебвью; 1 - непрозрачно). Пакет владеет хореографией (гонит контроллеры),
+/// а сам визуал перехода задаёт приложение - чтобы анимация, привязанная к
+/// конкретной кнопке, жила в app, а не в пакете. null - дефолтная заглушка.
+typedef IntercomCoverBuilder =
+    Widget Function(
+      BuildContext context,
+      Animation<double> reveal,
+      Animation<double> fade,
+    );
+
 /// Intercom Web Messenger как fullscreen оверлей с persistent WebView.
 ///
 /// WebView создаётся при первом [show] и живёт до явного [destroy].
@@ -69,10 +81,14 @@ class IntercomWebViewOverlay {
     // нейтральный fallback - пакет не знает палитру воркспейса).
     Color backgroundColor = const Color(0xFF000000),
     Duration fallbackCloseDelay = const Duration(seconds: 15),
+    // Визуал перехода показа/закрытия (см. [IntercomCoverBuilder]). Задаёт
+    // приложение; null - дефолтная заглушка цвета фона без морфинга.
+    IntercomCoverBuilder? coverBuilder,
   }) async {
     _readyCompleter = Completer<void>();
 
     if (_state != null && _state!.mounted && _state!._sdkLoaded) {
+      _state!._coverBuilder = coverBuilder;
       _state!._showIntercom();
       await _readyCompleter!.future;
       return;
@@ -95,6 +111,7 @@ class IntercomWebViewOverlay {
       baseUrl: baseUrl,
       backgroundColor: backgroundColor,
       fallbackCloseDelay: fallbackCloseDelay,
+      coverBuilder: coverBuilder,
     );
 
     _entry = OverlayEntry(builder: (_) => overlayWidget);
@@ -130,6 +147,7 @@ class _OverlayWidget extends StatefulWidget {
   final String baseUrl;
   final Color backgroundColor;
   final Duration fallbackCloseDelay;
+  final IntercomCoverBuilder? coverBuilder;
 
   const _OverlayWidget({
     required this.appId,
@@ -142,6 +160,7 @@ class _OverlayWidget extends StatefulWidget {
     this.baseUrl = 'https://app.intercom.io',
     this.backgroundColor = const Color(0xFF000000),
     this.fallbackCloseDelay = const Duration(seconds: 15),
+    this.coverBuilder,
   });
 
   @override
@@ -149,9 +168,20 @@ class _OverlayWidget extends StatefulWidget {
 }
 
 class _OverlayWidgetState extends State<_OverlayWidget>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  // Появление мгновенное (controller в 0), закрытие - slide вниз.
+    with WidgetsBindingObserver, TickerProviderStateMixin {
+  // Позиция вебвью: 0 - на экране, 1 - за нижней границей. Меняется мгновенно
+  // (snap) и всегда под непрозрачной заглушкой, поэтому не анимируется - вебвью
+  // (platform view) только транслируется, без ресайза/масштаба.
   late final AnimationController _slideController;
+  // Прогресс раскрытия заглушки: 0 - закрыто, 1 - на весь экран. Открытие -
+  // forward, закрытие - reverse. Визуал по нему рисует coverBuilder приложения.
+  late final AnimationController _revealController;
+  // Кросс-фейд контента: 0 - заглушка прозрачна (виден вебвью), 1 - непрозрачна.
+  // На открытии гасим в 0 в конце (контент проявляется), на закрытии поднимаем в
+  // 1 в начале (контент уходит под заглушку перед схлопыванием).
+  late final AnimationController _fadeController;
+  // Визуал перехода от приложения. null - дефолтная заглушка без морфинга.
+  IntercomCoverBuilder? _coverBuilder;
   final _webViewKey = GlobalKey();
 
   InAppWebViewController? _controller;
@@ -159,6 +189,14 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   bool _sdkLoaded = false;
   bool _intercomVisible = false;
   bool _closing = false;
+  // Заглушка поверх вебвью - живёт только на МОМЕНТ показа чата. Прикрывает
+  // белую вспышку: вебвью грелся за экраном, его surface остаётся дефолтно-белым
+  // и при выводе на экран мелькает; заглушка перекрывает его, пока on-screen не
+  // скомпозится тёмный контент, и снимается по таймеру (_scheduleUncover). Сам
+  // визуал (морфинг из кнопки и т.п.) рисует coverBuilder приложения. На фазе
+  // ЗАГРУЗКИ заглушки нет: оверлей за экраном, приложение видно и доступно.
+  bool _covered = false;
+  Timer? _uncoverTimer;
   // Текущий show отменён (таймаут/ошибка). Поздний _onIntercomReady
   // не должен всплывать поверх caller'а, ушедшего на webapp-fallback.
   bool _showCancelled = false;
@@ -174,12 +212,25 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   void initState() {
     super.initState();
     _showStartedAt = DateTime.now();
+    _coverBuilder = widget.coverBuilder;
     IntercomWebViewOverlay._state = this;
     WidgetsBinding.instance.addObserver(this);
     _slideController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
+    _revealController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 450),
+    );
+    _fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 160),
+    );
+    // Стартуем за экраном (value=1): вебвью греется fullscreen за нижней границей,
+    // приложение под оверлеем полностью видно и доступно. Показ - раскрытие
+    // заглушки из кнопки + snap вебвью в 0 под уже-фуллскрин-заглушкой.
+    _slideController.value = 1;
     if (_useLocalPageMode) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_prepareOverlay());
@@ -196,8 +247,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       IntercomWebViewOverlay._state = null;
     }
     _slideController.dispose();
+    _revealController.dispose();
+    _fadeController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _fallbackTimer?.cancel();
+    _uncoverTimer?.cancel();
     unawaited(_pageServer?.close() ?? Future<void>.value());
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy();
@@ -205,6 +259,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     super.dispose();
   }
 
+  // Legacy system back (кнопка/жест без predictive back).
   @override
   Future<bool> didPopRoute() async {
     if (_intercomVisible) {
@@ -212,6 +267,18 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       return true;
     }
     return false;
+  }
+
+  // Predictive back (Android 13+/жест). Пока чат открыт - «клеймим» жест на себя,
+  // иначе он уходит в Navigator/систему и закрывает всё приложение, а не оверлей.
+  // Без клейма didPopRoute сюда не доходит (вызывается лишь как fallback, когда
+  // жест не заклеймлен).
+  @override
+  bool handleStartBackGesture(PredictiveBackEvent backEvent) => _intercomVisible;
+
+  @override
+  void handleCommitBackGesture() {
+    if (_intercomVisible) _hide();
   }
 
   void _startFallbackTimer() {
@@ -276,21 +343,54 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       return;
     }
     _applySystemChrome();
-    setState(() => _intercomVisible = true);
+    // Сообщаем движку, что back обрабатываем мы (иначе при predictive back ОС
+    // покажет «приложение закроется» и закроет его, минуя наш handleStartBackGesture).
+    SystemNavigator.setFrameworkHandlesBack(true);
+    setState(() {
+      _covered = true;
+      _intercomVisible = true;
+    });
+    _runReveal();
     _completeReady();
+  }
+
+  /// Показ container-transform'ом: контейнер-заглушка раскрывается из rect кнопки
+  /// в фуллскрин (вебвью держим за экраном - platform view нельзя масштабировать).
+  /// Когда контейнер стал фуллскрин - снапаем вебвью под него, ждём прокраски
+  /// surface (минуя белую реализацию) и плавно гасим заглушку: контент проявляется.
+  void _runReveal() {
+    _uncoverTimer?.cancel();
+    _fadeController.value = 1; // заглушка непрозрачна
+    _slideController.value = 1; // вебвью за экраном на время морфинга
+
+    void onMorphed() {
+      if (!mounted) return;
+      _slideController.value = 0; // снап вебвью под фуллскрин-заглушку
+      _uncoverTimer = Timer(const Duration(milliseconds: 250), () {
+        if (!mounted) return;
+        _fadeController.reverse().whenComplete(() {
+          if (mounted) setState(() => _covered = false);
+        });
+      });
+    }
+
+    // Без кастомного визуала - без морфинга: сразу фуллскрин-заглушка.
+    if (_coverBuilder == null) {
+      _revealController.value = 1;
+      onMorphed();
+      return;
+    }
+    _revealController.forward(from: 0).whenComplete(onMorphed);
   }
 
   /// Повторное открытие через JS (SDK уже загружен).
   void _showIntercom() {
     if (_controller == null) return;
-    // Переоткрытие после отмены прошлого show: снова разрешаем показ виджета.
+    // Переоткрытие: снова разрешаем показ. Визуальный показ (раскрытие заглушки +
+    // снап вебвью) запустит onIntercomReady, который придёт из JS onShow ниже -
+    // единая точка для первого и повторного открытия. До этого оверлей остаётся
+    // за экраном: приложение видно и доступно, пока чат не готов выехать.
     _showCancelled = false;
-    _applySystemChrome();
-    setState(() {
-      _intercomVisible = true;
-      _closing = false;
-    });
-    _slideController.value = 0;
     // SDK уже загружен с темой из intercomSettings, но при reuse тему дублируем
     // через update - на случай если тема приложения сменилась между показами.
     final themeMode =
@@ -313,20 +413,54 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     );
   }
 
-  /// Скрыть Intercom (не уничтожая WebView). Закрытие - slide вниз.
-  Future<void> _hide() async {
+  /// Закрытие container-transform'ом (зеркально показу): поднимаем заглушку над
+  /// контентом (fade), снапаем вебвью за экран под ней и схлопываем контейнер
+  /// обратно в rect кнопки. WebView НЕ убиваем - остаётся тёплым.
+  void _hide() {
     if (!mounted || _closing || !_intercomVisible) return;
-    setState(() => _closing = true);
-    await _slideController.forward();
-    if (mounted) {
+    _uncoverTimer?.cancel();
+
+    void finishClose() {
+      if (!mounted) return;
+      // Чат закрыт - back снова обрабатывает система/Navigator.
+      SystemNavigator.setFrameworkHandlesBack(false);
       setState(() {
+        _covered = false;
         _intercomVisible = false;
         _closing = false;
       });
-      _slideController.value = 0;
+      _controller?.evaluateJavascript(source: "window.Intercom('hide');");
+      _completeReady();
     }
-    _controller?.evaluateJavascript(source: "window.Intercom('hide');");
-    _completeReady();
+
+    // Закрытие во время показа (заглушка ещё поднята) - прячем оверлей мгновенно.
+    if (_covered) {
+      _revealController.stop();
+      _fadeController.stop();
+      _slideController.value = 1;
+      finishClose();
+
+      return;
+    }
+
+    setState(() {
+      _closing = true;
+      _covered = true; // поднимаем заглушку над контентом
+    });
+
+    void collapse() {
+      if (!mounted) return;
+      _slideController.value = 1; // вебвью за экран под непрозрачной заглушкой
+      if (_coverBuilder == null) {
+        _revealController.value = 0;
+        finishClose();
+      } else {
+        _revealController.reverse().whenComplete(finishClose);
+      }
+    }
+
+    // 1) Контент уходит под заглушку (fade in), 2) схлопываем контейнер в кнопку.
+    _fadeController.forward(from: 0).whenComplete(collapse);
   }
 
   void _completeReady() {
@@ -341,9 +475,17 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // _onIntercomReady не должен всплыть поверх caller'а на webapp-fallback.
     IntercomWebViewOverlay._readyCompleter = null;
     _showCancelled = true;
-    // Прячем виджет, но WebView НЕ убиваем - SDK догревается в фоне offstage,
-    // чтобы повторное открытие осталось моментальным.
-    if (mounted) setState(() => _intercomVisible = false);
+    _uncoverTimer?.cancel();
+    // Уводим оверлей за экран и снимаем заглушку - приложение снова видно и
+    // доступно (caller ушёл на webapp). WebView НЕ убиваем: SDK догревается за
+    // экраном, повторное открытие останется быстрым.
+    if (mounted) {
+      setState(() {
+        _intercomVisible = false;
+        _covered = false;
+      });
+      _slideController.value = 1;
+    }
   }
 
   /// Красит статус/нав-бар под фон чата. Цвет фиксированный (widget.backgroundColor),
@@ -371,114 +513,59 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       return const SizedBox.shrink();
     }
 
-    if (!_intercomVisible && !_closing) {
-      // Греем webview offstage на 1x1: SDK грузится в фоне, чат открывается
-      // мгновенно по готовности.
-      return Offstage(
-        child: SizedBox(width: 1, height: 1, child: _buildWebView()),
-      );
-    }
-
-    // Появление мгновенное (controller в 0 = на месте), закрытие - slide вниз
-    // (controller 0->1). Фон backgroundColor сразу под мессенджером.
-    return SlideTransition(
-      position: Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
-          .animate(
-            CurvedAnimation(parent: _slideController, curve: Curves.easeInCubic),
-          ),
-      child: IgnorePointer(
-        ignoring: _closing,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: ColoredBox(color: widget.backgroundColor),
+    // Пока поднята заглушка (момент показа) или идёт закрытие - глушим тачи во
+    // всём оверлее, чтобы они не проваливались на приложение под ним. В открытом
+    // чате (заглушка снята) вебвью интерактивен. За экраном (загрузка/закрыт)
+    // оверлей не ловит тачи - приложение доступно.
+    return AbsorbPointer(
+      absorbing: _covered || _closing,
+      child: Stack(
+        children: [
+          // Вебвью ВСЕГДА fullscreen и всегда в дереве - даже пока греется.
+          // Видимостью управляет слайд: value=1 - за нижней границей экрана,
+          // value=0 - на экране. Никаких Offstage/1x1: ресайз platform view при
+          // показе давал рывок и белые полосы по краям.
+          Positioned.fill(
+            child: SlideTransition(
+              position:
+                  Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
+                      .animate(
+                        CurvedAnimation(
+                          parent: _slideController,
+                          curve: Curves.easeInCubic,
+                        ),
+                      ),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: ColoredBox(color: widget.backgroundColor),
+                  ),
+                  Positioned.fill(
+                    child: _IntercomWebView(
+                      webViewKey: _webViewKey,
+                      initialUrlRequest: _useLocalPageMode
+                          ? URLRequest(url: WebUri(_pageUri.toString()))
+                          : null,
+                      proxyConfig: widget.proxyConfig,
+                      onCreated: _onWebViewCreated,
+                      elapsedMs: _elapsedMs,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            Positioned.fill(child: _buildWebView()),
-          ],
-        ),
+          ),
+          // Заглушка поверх вебвью на момент показа: визуал задаёт приложение
+          // (coverBuilder), пакет лишь гонит контроллеры. Без билдера - дефолтная
+          // заглушка цвета фона. Прячет белую реализацию surface при выводе.
+          if (_covered)
+            _coverBuilder?.call(context, _revealController, _fadeController) ??
+                _DefaultCover(
+                  fade: _fadeController,
+                  color: widget.backgroundColor,
+                ),
+        ],
       ),
-    );
-  }
-
-  Widget _buildWebView() {
-    return InAppWebView(
-      key: _webViewKey,
-      initialUrlRequest: _useLocalPageMode
-          ? URLRequest(url: WebUri(_pageUri.toString()))
-          : null,
-      initialSettings: _buildSettings(),
-      onWebViewCreated: _onWebViewCreated,
-      onConsoleMessage: (_, msg) {
-        if (kDebugMode) {
-          debugPrint(
-            '[Intercom WebView] console(${msg.messageLevel}): ${msg.message}',
-          );
-        }
-      },
-      onLoadStart: (_, url) {
-        if (kDebugMode) {
-          debugPrint('[Intercom WebView] +${_elapsedMs()}ms loadStart: $url');
-        }
-      },
-      onLoadStop: (_, url) {
-        if (kDebugMode) {
-          debugPrint('[Intercom WebView] +${_elapsedMs()}ms loadStop: $url');
-        }
-      },
-      onReceivedError: (_, request, error) {
-        if (kDebugMode) {
-          debugPrint(
-            '[Intercom WebView] +${_elapsedMs()}ms loadError: url=${request.url} '
-            'type=${error.type} desc=${error.description}',
-          );
-        }
-      },
-      onReceivedHttpError: (_, request, errorResponse) {
-        if (kDebugMode) {
-          debugPrint(
-            '[Intercom WebView] +${_elapsedMs()}ms httpError: url=${request.url} '
-            'status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase}',
-          );
-        }
-      },
-      onReceivedServerTrustAuthRequest: (_, challenge) async {
-        final sslError = challenge.protectionSpace.sslError;
-        if (kDebugMode) {
-          debugPrint(
-            '[Intercom WebView] +${_elapsedMs()}ms serverTrust: '
-            'host=${challenge.protectionSpace.host}:'
-            '${challenge.protectionSpace.port} sslError=${sslError?.message}',
-          );
-        }
-        // PROCEED только если система валидировала цепочку (sslError == null).
-        // Иначе CANCEL - не доверяем подделанному серверу/прокси.
-        return ServerTrustAuthResponse(
-          action: sslError == null
-              ? ServerTrustAuthResponseAction.PROCEED
-              : ServerTrustAuthResponseAction.CANCEL,
-        );
-      },
-      shouldOverrideUrlLoading: _handleUrlLoading,
-      onReceivedHttpAuthRequest: (controller, challenge) async {
-        final proxy = widget.proxyConfig;
-        if (kDebugMode) {
-          // Каждый CONNECT-туннель прокси к домену Intercom бьёт сюда -
-          // по этим строкам видно водопад подключений и его тайминги.
-          debugPrint(
-            '[Intercom WebView] +${_elapsedMs()}ms proxy auth request from '
-            '${challenge.protectionSpace.host}:${challenge.protectionSpace.port}',
-          );
-        }
-        if (proxy != null && proxy.hasAuth) {
-          return HttpAuthResponse(
-            username: proxy.username!,
-            password: proxy.password!,
-            action: HttpAuthResponseAction.PROCEED,
-            permanentPersistence: true,
-          );
-        }
-        return HttpAuthResponse(action: HttpAuthResponseAction.CANCEL);
-      },
     );
   }
 
@@ -499,7 +586,10 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         if (kDebugMode) {
           debugPrint('[Intercom WebView] onIntercomShown +${_elapsedMs()}ms');
         }
-        // Виджет реально отрисован - дёргаем хук для аналитики.
+        // Мессенджер реально отрисован - дёргаем хук аналитики. Заглушку здесь НЕ
+        // снимаем: onIntercomShown ловит отрисовку DOM (она на прогреве за экраном
+        // уже была), а нам нужно дождаться композита surface ON-SCREEN после
+        // снапа - этим занимается таймер из _scheduleUncover.
         if (!_showCancelled) IntercomWebViewOverlay.onShown?.call();
       },
     );
@@ -527,6 +617,136 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       baseUrl: WebUri(widget.baseUrl),
       mimeType: 'text/html',
       encoding: 'utf-8',
+    );
+  }
+
+  String _buildOverlayHtml() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final padding = MediaQuery.of(context).padding;
+    final argb = widget.backgroundColor.toARGB32();
+    final bgCss = '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
+
+    return IntercomHtmlBuilder(
+      appId: widget.appId,
+      userId: widget.userId,
+      email: widget.email,
+      userHash: widget.userHash,
+      userName: widget.userName,
+      customAttributes: widget.customAttributes,
+      colorScheme: isDark ? 'dark' : 'light',
+      backgroundColorCss: bgCss,
+      topInset: padding.top,
+      bottomInset: padding.bottom,
+    ).build();
+  }
+}
+
+/// WebView с Intercom Web Messenger: загрузка по [initialUrlRequest] (локальный
+/// режим) либо через `loadData` в [onCreated]. Внешние ссылки уходят в системный
+/// браузер, прокси-авторизация и server-trust обрабатываются здесь. [elapsedMs] -
+/// для относительных таймингов в debug-логах.
+class _IntercomWebView extends StatelessWidget {
+  const _IntercomWebView({
+    required this.webViewKey,
+    required this.initialUrlRequest,
+    required this.proxyConfig,
+    required this.onCreated,
+    required this.elapsedMs,
+  });
+
+  final Key webViewKey;
+  final URLRequest? initialUrlRequest;
+  final ProxyConfig? proxyConfig;
+  final void Function(InAppWebViewController controller) onCreated;
+  final int Function() elapsedMs;
+
+  @override
+  Widget build(BuildContext context) {
+    return InAppWebView(
+      key: webViewKey,
+      initialUrlRequest: initialUrlRequest,
+      initialSettings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
+        // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
+        mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
+        useHybridComposition: true,
+        domStorageEnabled: true,
+        supportZoom: false,
+        transparentBackground: true,
+      ),
+      onWebViewCreated: onCreated,
+      onConsoleMessage: (_, msg) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] console(${msg.messageLevel}): ${msg.message}',
+          );
+        }
+      },
+      onLoadStart: (_, url) {
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] +${elapsedMs()}ms loadStart: $url');
+        }
+      },
+      onLoadStop: (_, url) {
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] +${elapsedMs()}ms loadStop: $url');
+        }
+      },
+      onReceivedError: (_, request, error) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] +${elapsedMs()}ms loadError: url=${request.url} '
+            'type=${error.type} desc=${error.description}',
+          );
+        }
+      },
+      onReceivedHttpError: (_, request, errorResponse) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] +${elapsedMs()}ms httpError: url=${request.url} '
+            'status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase}',
+          );
+        }
+      },
+      onReceivedServerTrustAuthRequest: (_, challenge) async {
+        final sslError = challenge.protectionSpace.sslError;
+        if (kDebugMode) {
+          debugPrint(
+            '[Intercom WebView] +${elapsedMs()}ms serverTrust: '
+            'host=${challenge.protectionSpace.host}:'
+            '${challenge.protectionSpace.port} sslError=${sslError?.message}',
+          );
+        }
+        // PROCEED только если система валидировала цепочку (sslError == null).
+        // Иначе CANCEL - не доверяем подделанному серверу/прокси.
+        return ServerTrustAuthResponse(
+          action: sslError == null
+              ? ServerTrustAuthResponseAction.PROCEED
+              : ServerTrustAuthResponseAction.CANCEL,
+        );
+      },
+      shouldOverrideUrlLoading: _handleUrlLoading,
+      onReceivedHttpAuthRequest: (controller, challenge) async {
+        final proxy = proxyConfig;
+        if (kDebugMode) {
+          // Каждый CONNECT-туннель прокси к домену Intercom бьёт сюда -
+          // по этим строкам видно водопад подключений и его тайминги.
+          debugPrint(
+            '[Intercom WebView] +${elapsedMs()}ms proxy auth request from '
+            '${challenge.protectionSpace.host}:${challenge.protectionSpace.port}',
+          );
+        }
+        if (proxy != null && proxy.hasAuth) {
+          return HttpAuthResponse(
+            username: proxy.username!,
+            password: proxy.password!,
+            action: HttpAuthResponseAction.PROCEED,
+            permanentPersistence: true,
+          );
+        }
+        return HttpAuthResponse(action: HttpAuthResponseAction.CANCEL);
+      },
     );
   }
 
@@ -563,41 +783,29 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     return NavigationActionPolicy.CANCEL;
   }
 
-  InAppWebViewSettings _buildSettings() {
-    return InAppWebViewSettings(
-      javaScriptEnabled: true,
-      // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
-      // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
-      mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
-      useHybridComposition: true,
-      domStorageEnabled: true,
-      supportZoom: false,
-      transparentBackground: true,
-    );
-  }
-
-  String _buildOverlayHtml() {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final padding = MediaQuery.of(context).padding;
-    final argb = widget.backgroundColor.toARGB32();
-    final bgCss = '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
-
-    return IntercomHtmlBuilder(
-      appId: widget.appId,
-      userId: widget.userId,
-      email: widget.email,
-      userHash: widget.userHash,
-      userName: widget.userName,
-      customAttributes: widget.customAttributes,
-      colorScheme: isDark ? 'dark' : 'light',
-      backgroundColorCss: bgCss,
-      topInset: padding.top,
-      bottomInset: padding.bottom,
-    ).build();
-  }
-
   bool _isLoopbackUri(WebUri uri) {
     final host = uri.host.toLowerCase();
     return host == '127.0.0.1' || host == 'localhost';
+  }
+}
+
+/// Дефолтная заглушка (когда [IntercomCoverBuilder] не задан): на весь экран
+/// цвета [color], гаснет по [fade] при показе/закрытии. Без морфинга.
+class _DefaultCover extends StatelessWidget {
+  const _DefaultCover({required this.fade, required this.color});
+
+  final Animation<double> fade;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: AnimatedBuilder(
+        animation: fade,
+        builder: (context, _) => ColoredBox(
+          color: color.withValues(alpha: fade.value.clamp(0.0, 1.0)),
+        ),
+      ),
+    );
   }
 }
