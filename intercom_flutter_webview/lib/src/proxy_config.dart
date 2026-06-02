@@ -33,6 +33,26 @@ class ProxyConfig {
 
   bool get hasAuth => username != null && password != null;
 
+  static bool get _isSupported =>
+      Platform.isAndroid ||
+      Platform.isIOS ||
+      Platform.isMacOS ||
+      Platform.isWindows;
+
+  // ProxyController - процесс-глобальный (один на процесс). [_owner] + сериализация
+  // [_serialize] защищают от гонки: при retry старый оверлей на dispose зовёт
+  // clearProxy, новый - applyProxy. Без этого clear мог стереть свежий set, и
+  // загрузка пошла бы мимо прокси.
+  static Object? _owner;
+  static Future<void> _opChain = Future<void>.value();
+
+  static Future<T> _serialize<T>(Future<T> Function() op) {
+    final next = _opChain.then((_) => op());
+    _opChain = next.then((_) {}, onError: (_) {});
+
+    return next;
+  }
+
   /// Применяет прокси через ProxyController.
   /// Работает на Android, iOS 17+, macOS 14+, Windows.
   ///
@@ -40,27 +60,31 @@ class ProxyConfig {
   /// (iOS < 17 / macOS < 14), нет WebView-фичи PROXY_OVERRIDE, либо нативная
   /// ошибка. Caller ОБЯЗАН проверить результат - при false прокси не встал и
   /// грузить контент напрямую нельзя (иначе тихий обход прокси).
-  Future<bool> applyProxy() async {
-    if (!Platform.isAndroid &&
-        !Platform.isIOS &&
-        !Platform.isMacOS &&
-        !Platform.isWindows) {
-      return false;
-    }
+  ///
+  /// [owner] - токен владельца override (обычно `this` оверлея); по нему
+  /// [clearProxy] понимает, не перебил ли его другой оверлей.
+  Future<bool> applyProxy({required Object owner}) {
+    if (!_isSupported) return Future<bool>.value(false);
 
-    try {
-      if (kDebugMode) {
-        debugPrint('[ProxyConfig] Applying proxy: $host:$port '
-            '(${hasAuth ? "with auth" : "no auth"})');
+    return _serialize(() async {
+      try {
+        if (kDebugMode) {
+          debugPrint('[ProxyConfig] Applying proxy: $host:$port '
+              '(${hasAuth ? "with auth" : "no auth"})');
+        }
+        await ProxyController.instance().setProxyOverride(
+          settings: _buildSettings(),
+        );
+        _owner = owner;
+        if (kDebugMode) debugPrint('[ProxyConfig] Proxy applied successfully');
+
+        return true;
+      } catch (e) {
+        if (kDebugMode) debugPrint('[ProxyConfig] Failed to apply proxy: $e');
+
+        return false;
       }
-      final proxyController = ProxyController.instance();
-      await proxyController.setProxyOverride(settings: _buildSettings());
-      if (kDebugMode) debugPrint('[ProxyConfig] Proxy applied successfully');
-      return true;
-    } catch (e) {
-      if (kDebugMode) debugPrint('[ProxyConfig] Failed to apply proxy: $e');
-      return false;
-    }
+    });
   }
 
   // iOS/macOS принимают креды прямо в ProxyRule (нативно applyCredential), и это
@@ -75,24 +99,27 @@ class ProxyConfig {
     return ProxySettings(proxyRules: [rule]);
   }
 
-  /// Сброс прокси.
-  static Future<void> clearProxy() async {
-    if (!Platform.isAndroid &&
-        !Platform.isIOS &&
-        !Platform.isMacOS &&
-        !Platform.isWindows) {
-      return;
-    }
+  /// Сброс прокси. Чистит override только если [owner] всё ещё владеет им -
+  /// иначе (другой оверлей уже поставил свой прокси) это был бы no-op-стирание
+  /// чужого override (гонка на retry).
+  static Future<void> clearProxy({required Object owner}) {
+    if (!_isSupported) return Future<void>.value();
 
-    try {
-      final proxyController = ProxyController.instance();
-      await proxyController.clearProxyOverride();
-      if (kDebugMode) debugPrint('[ProxyConfig] Proxy cleared');
-    } catch (e) {
-      if (kDebugMode) debugPrint('[ProxyConfig] Failed to clear proxy: $e');
-    }
+    return _serialize(() async {
+      if (!identical(_owner, owner)) {
+        if (kDebugMode) {
+          debugPrint('[ProxyConfig] clearProxy skipped: not current owner');
+        }
+
+        return;
+      }
+      try {
+        await ProxyController.instance().clearProxyOverride();
+        _owner = null;
+        if (kDebugMode) debugPrint('[ProxyConfig] Proxy cleared');
+      } catch (e) {
+        if (kDebugMode) debugPrint('[ProxyConfig] Failed to clear proxy: $e');
+      }
+    });
   }
-
-  @Deprecated('Use clearProxy() instead')
-  static Future<void> clearAndroidProxy() => clearProxy();
 }

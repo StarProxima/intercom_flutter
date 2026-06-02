@@ -87,7 +87,19 @@ class IntercomWebViewOverlay {
   }) async {
     _readyCompleter = Completer<void>();
 
-    if (_state != null && _state!.mounted && _state!._sdkLoaded) {
+    // Переиспользуем тёплый оверлей только если identity/appId/baseUrl те же.
+    // Иначе (logout->login, смена юзера) показали бы чат прошлого юзера -
+    // пересоздаём ниже с новой identity.
+    if (_state != null &&
+        _state!.mounted &&
+        _state!._sdkLoaded &&
+        _state!._matchesShowConfig(
+          appId: appId,
+          userId: userId,
+          email: email,
+          userHash: userHash,
+          baseUrl: baseUrl,
+        )) {
       _state!._coverBuilder = coverBuilder;
       _state!._showIntercom();
       await _readyCompleter!.future;
@@ -186,13 +198,16 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   InAppWebViewController? _controller;
   bool _proxyReady = false;
+  // Системный стиль баров до открытия чата - восстанавливаем на закрытии, иначе
+  // статус/нав-бар остаются крашены в фон чата (_applySystemChrome).
+  SystemUiOverlayStyle? _previousChrome;
   bool _sdkLoaded = false;
   bool _intercomVisible = false;
   bool _closing = false;
   // Заглушка поверх вебвью - живёт только на МОМЕНТ показа чата. Прикрывает
   // белую вспышку: вебвью грелся за экраном, его surface остаётся дефолтно-белым
   // и при выводе на экран мелькает; заглушка перекрывает его, пока on-screen не
-  // скомпозится тёмный контент, и снимается по таймеру (_scheduleUncover). Сам
+  // скомпозится тёмный контент, и снимается по _uncoverTimer (в _runReveal). Сам
   // визуал (морфинг из кнопки и т.п.) рисует coverBuilder приложения. На фазе
   // ЗАГРУЗКИ заглушки нет: оверлей за экраном, приложение видно и доступно.
   bool _covered = false;
@@ -254,7 +269,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _uncoverTimer?.cancel();
     unawaited(_pageServer?.close() ?? Future<void>.value());
     if (widget.proxyConfig != null) {
-      ProxyConfig.clearProxy();
+      ProxyConfig.clearProxy(owner: this);
     }
     super.dispose();
   }
@@ -297,7 +312,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   Future<void> _prepareOverlay() async {
     final proxy = widget.proxyConfig;
     if (proxy != null) {
-      final applied = await proxy.applyProxy();
+      final applied = await proxy.applyProxy(owner: this);
       // Прокси не встал - грузить Intercom напрямую нельзя (тихий обход прокси).
       // Рвём show с ошибкой: caller уйдёт на webapp-fallback, а вебвью так и не
       // монтируется (build ждёт _proxyReady), прямого коннекта не будет.
@@ -397,14 +412,39 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _revealController.forward(from: 0).whenComplete(onMorphed);
   }
 
+  /// Тёплый оверлей валиден для reuse только при совпадении identity/appId/baseUrl.
+  bool _matchesShowConfig({
+    required String appId,
+    required String? userId,
+    required String? email,
+    required String? userHash,
+    required String baseUrl,
+  }) =>
+      widget.appId == appId &&
+      widget.userId == userId &&
+      widget.email == email &&
+      widget.userHash == userHash &&
+      widget.baseUrl == baseUrl;
+
   /// Повторное открытие через JS (SDK уже загружен).
   void _showIntercom() {
     if (_controller == null) return;
-    // Переоткрытие: снова разрешаем показ. Визуальный показ (раскрытие заглушки +
-    // снап вебвью) запустит onIntercomReady, который придёт из JS onShow ниже -
-    // единая точка для первого и повторного открытия. До этого оверлей остаётся
-    // за экраном: приложение видно и доступно, пока чат не готов выехать.
+    // Переоткрытие: снова разрешаем показ. onShow-хук стоит с initial-загрузки
+    // (showJs) и срабатывает на каждый show, в т.ч. этот, -> onIntercomReady.
+    // Перерегистрировать его здесь НЕЛЬЗЯ: на каждый reopen копился бы лишний
+    // листенер -> дубли onIntercomReady/onIntercomShown.
     _showCancelled = false;
+    // На тёплом reopen initState-таймера уже нет (отменён в _onIntercomReady), а
+    // onShow на warm-state SDK может не прийти - ставим свой таймаут, иначе caller
+    // (await show) висит вечно со спиннером.
+    _fallbackTimer?.cancel();
+    _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
+      if (mounted && !_intercomVisible && !_showCancelled) {
+        _completeWithError(
+          const IntercomLoadException('Intercom failed to reopen (timeout).'),
+        );
+      }
+    });
     // SDK уже загружен с темой из intercomSettings, но при reuse тему дублируем
     // через update - на случай если тема приложения сменилась между показами.
     final themeMode =
@@ -413,16 +453,6 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       source: '''
       window.Intercom('update', {theme_mode: '$themeMode'});
       window.Intercom('show');
-      window.Intercom('onShow', function() {
-        if (window.flutter_inappwebview) {
-          window.flutter_inappwebview.callHandler('onIntercomReady');
-        }
-        _whenMessengerPainted(function() {
-          if (window.flutter_inappwebview) {
-            window.flutter_inappwebview.callHandler('onIntercomShown');
-          }
-        });
-      });
     ''',
     );
   }
@@ -438,6 +468,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       if (!mounted) return;
       // Чат закрыт - back снова обрабатывает система/Navigator.
       SystemNavigator.setFrameworkHandlesBack(false);
+      // Возвращаем стиль баров приложения (на открытии красили в фон чата).
+      final previous = _previousChrome;
+      if (previous != null) SystemChrome.setSystemUIOverlayStyle(previous);
       setState(() {
         _covered = false;
         _intercomVisible = false;
@@ -506,6 +539,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// поэтому ставим сразу - без чтения реального фона мессенджера (оно ловило
   /// белый фрейм на первых заходах -> вспышка).
   void _applySystemChrome() {
+    // Снимок стиля приложения до первого оверрайда - вернём его в finishClose.
+    _previousChrome ??= SystemChrome.latestStyle;
     final color = widget.backgroundColor;
     final iconBrightness =
         ThemeData.estimateBrightnessForColor(color) == Brightness.dark
@@ -560,11 +595,16 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                   // Android нативный WebView сам скроллит контент, утягивая хедер
                   // вверх. Ужимаем вебвью снизу на высоту клавиатуры: фрейм
                   // уменьшается -> инпут встаёт над клавой, хедер остаётся на месте.
-                  // Двойного инсета нет - резайзит только этот Padding.
+                  // Инсет только когда чат - интерактивная foreground-поверхность
+                  // (открыт, заглушка снята, не закрывается); иначе (греется
+                  // off-screen / под заглушкой / закрывается) ambient-клавиатура
+                  // приложения снизу зря ресайзила бы вебвью.
                   Positioned.fill(
                     child: Padding(
                       padding: EdgeInsets.only(
-                        bottom: MediaQuery.viewInsetsOf(context).bottom,
+                        bottom: _intercomVisible && !_covered && !_closing
+                            ? MediaQuery.viewInsetsOf(context).bottom
+                            : 0.0,
                       ),
                       child: _IntercomWebView(
                         webViewKey: _webViewKey,
@@ -572,6 +612,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                             ? URLRequest(url: WebUri(_pageUri.toString()))
                             : null,
                         proxyConfig: widget.proxyConfig,
+                        originHost: Uri.parse(widget.baseUrl).host,
                         onCreated: _onWebViewCreated,
                         elapsedMs: _elapsedMs,
                       ),
@@ -615,7 +656,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         // Мессенджер реально отрисован - дёргаем хук аналитики. Заглушку здесь НЕ
         // снимаем: onIntercomShown ловит отрисовку DOM (она на прогреве за экраном
         // уже была), а нам нужно дождаться композита surface ON-SCREEN после
-        // снапа - этим занимается таймер из _scheduleUncover.
+        // снапа - этим занимается _uncoverTimer в _runReveal.
         if (!_showCancelled) IntercomWebViewOverlay.onShown?.call();
       },
     );
@@ -676,6 +717,7 @@ class _IntercomWebView extends StatelessWidget {
     required this.webViewKey,
     required this.initialUrlRequest,
     required this.proxyConfig,
+    required this.originHost,
     required this.onCreated,
     required this.elapsedMs,
   });
@@ -683,6 +725,9 @@ class _IntercomWebView extends StatelessWidget {
   final Key webViewKey;
   final URLRequest? initialUrlRequest;
   final ProxyConfig? proxyConfig;
+  // Хост страницы мессенджера (из baseUrl) - его навигации держим в вебвью,
+  // остальные внешние хосты уводим в системный браузер (см. _shouldKeepInWebView).
+  final String originHost;
   final void Function(InAppWebViewController controller) onCreated;
   final int Function() elapsedMs;
 
@@ -700,8 +745,25 @@ class _IntercomWebView extends StatelessWidget {
         domStorageEnabled: true,
         supportZoom: false,
         transparentBackground: true,
+        // Без этого shouldOverrideUrlLoading на Android может не вызываться, и
+        // внешние ссылки из чата грузились бы внутри вебвью (где их режет прокси).
+        useShouldOverrideUrlLoading: true,
+        // Ссылки Intercom (справка/агентские) часто target=_blank -> onCreateWindow.
+        // Эти два флага нужны, чтобы колбэк сработал, а не молча проглотился.
+        supportMultipleWindows: true,
+        javaScriptCanOpenWindowsAutomatically: true,
       ),
       onWebViewCreated: onCreated,
+      // target=_blank / window.open: новое окно в вебвью не создаём, внешний хост
+      // уводим в системный браузер (как и обычные внешние навигации).
+      onCreateWindow: (_, action) async {
+        final uri = action.request.url;
+        if (uri != null && !_shouldKeepInWebView(uri) && uri.hasScheme) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+
+        return false;
+      },
       onConsoleMessage: (_, msg) {
         if (kDebugMode) {
           debugPrint(
@@ -762,15 +824,24 @@ class _IntercomWebView extends StatelessWidget {
       shouldOverrideUrlLoading: _handleUrlLoading,
       onReceivedHttpAuthRequest: (controller, challenge) async {
         final proxy = proxyConfig;
+        final space = challenge.protectionSpace;
         if (kDebugMode) {
           // Каждый CONNECT-туннель прокси к домену Intercom бьёт сюда -
           // по этим строкам видно водопад подключений и его тайминги.
           debugPrint(
             '[Intercom WebView] +${elapsedMs()}ms proxy auth request from '
-            '${challenge.protectionSpace.host}:${challenge.protectionSpace.port}',
+            '${space.host}:${space.port}',
           );
         }
-        if (proxy != null && proxy.hasAuth) {
+        // Креды прокси отдаём ТОЛЬКО на челлендж от самого прокси - сверяем по
+        // host (он уникален, не пересекается с Intercom-доменами); иначе origin-
+        // сервер с Basic-челленджем выманил бы прокси-креды. Порт сверяем
+        // толерантно: Android в proxy-челлендже отдаёт port=-1/null (не указан).
+        final port = space.port;
+        final isProxyChallenge = proxy != null &&
+            space.host == proxy.host &&
+            (port == null || port <= 0 || port == proxy.port);
+        if (isProxyChallenge && proxy.hasAuth) {
           return HttpAuthResponse(
             username: proxy.username!,
             password: proxy.password!,
@@ -790,40 +861,49 @@ class _IntercomWebView extends StatelessWidget {
     final uri = action.request.url;
     if (uri == null) return NavigationActionPolicy.ALLOW;
 
-    final urlString = uri.toString();
-
     if (kDebugMode) {
       debugPrint(
         '[Intercom WebView] urlLoading: type=${action.navigationType} '
-        'mainFrame=${action.isForMainFrame} url=$urlString',
+        'mainFrame=${action.isForMainFrame} url=$uri',
       );
     }
 
-    // В системный браузер уводим ТОЛЬКО явные клики юзера по ссылкам в чате.
-    // Всё остальное (initial-загрузка документа через loadData с baseUrl=origin,
-    // редиректы и навигации самого Intercom) грузим в вебвью. Иначе на iOS
-    // loadData с baseUrl триггерит этот колбэк на саму data-навигацию: origin
-    // (не *.intercom.io) улетает в Safari, навигация отменяется и вебвью пустой.
-    // На Android loadDataWithBaseURL этот колбэк на initial-load не дёргает.
-    if (action.navigationType != NavigationType.LINK_ACTIVATED) {
-      return NavigationActionPolicy.ALLOW;
-    }
+    if (_shouldKeepInWebView(uri)) return NavigationActionPolicy.ALLOW;
 
-    if (_isLoopbackUri(uri) ||
-        urlString.startsWith('about:') ||
-        urlString.startsWith('data:') ||
-        urlString.contains('intercom.io') ||
-        urlString.contains('intercomcdn.com') ||
-        urlString.contains('intercomassets.com') ||
-        urlString.contains('intercom-messenger.com')) {
-      return NavigationActionPolicy.ALLOW;
-    }
-
-    final launchUri = Uri.tryParse(urlString);
-    if (launchUri != null && launchUri.hasScheme) {
-      await launchUrl(launchUri, mode: LaunchMode.externalApplication);
+    // Навигация на внешний хост (ссылка из чата на справку / агентская ссылка) -
+    // в системный браузер, а не внутрь вебвью: там её режет прокси (CONNECT
+    // только к Intercom-доменам) -> "access denied" и перекрытие чата.
+    if (uri.hasScheme) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
     return NavigationActionPolicy.CANCEL;
+  }
+
+  // В вебвью держим только страницу мессенджера (origin) + домены Intercom +
+  // служебные схемы; остальное уводим наружу. Решаем по ХОСТУ (не substring:
+  // 'intercom.io.evil.test' не должен пройти) и НЕ по navigationType: ссылки
+  // Intercom часто открываются через JS (target=_blank) как OTHER, а не
+  // LINK_ACTIVATED. Origin в allowlist'е чинит и initial loadData(baseUrl) на
+  // iOS (иначе он улетал в Safari, оставляя вебвью пустым).
+  bool _shouldKeepInWebView(WebUri uri) {
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme == 'about' || scheme == 'data' || scheme == 'blob') return true;
+    if (_isLoopbackUri(uri)) return true;
+
+    final host = uri.host.toLowerCase();
+
+    return host == originHost || _isIntercomHost(host);
+  }
+
+  bool _isIntercomHost(String host) {
+    const domains = [
+      'intercom.io',
+      'intercomcdn.com',
+      'intercomassets.com',
+      'intercom-messenger.com',
+    ];
+
+    return domains.any((d) => host == d || host.endsWith('.$d'));
   }
 
   bool _isLoopbackUri(WebUri uri) {

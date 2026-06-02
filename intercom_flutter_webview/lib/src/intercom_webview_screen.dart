@@ -55,7 +55,7 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   Future<void> _setupProxy() async {
     final proxy = widget.proxyConfig;
     if (proxy != null) {
-      final applied = await proxy.applyProxy();
+      final applied = await proxy.applyProxy(owner: this);
       // Прокси не встал - не грузим вебвью напрямую (тихий обход), показываем ошибку.
       if (!applied) {
         if (mounted) setState(() => _proxyFailed = true);
@@ -71,7 +71,7 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   @override
   void dispose() {
     if (widget.proxyConfig != null) {
-      ProxyConfig.clearProxy();
+      ProxyConfig.clearProxy(owner: this);
     }
     super.dispose();
   }
