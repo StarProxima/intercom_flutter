@@ -95,6 +95,15 @@ class IntercomWebViewOverlay {
     // приложение; null - дефолтная заглушка цвета фона без морфинга.
     IntercomCoverBuilder? coverBuilder,
   }) async {
+    // Незавершённый Future прошлого show после перезаписи _readyCompleter больше
+    // нигде не хранится - дорезолвим его ошибкой, иначе тот caller висит вечно
+    // (два быстрых show подряд; warm-окно учащает повторные заходы).
+    final prevCompleter = _readyCompleter;
+    if (prevCompleter != null && !prevCompleter.isCompleted) {
+      prevCompleter.completeError(
+        const IntercomLoadException('show superseded by a newer show'),
+      );
+    }
     _readyCompleter = Completer<void>();
 
     // Переиспользуем тёплый оверлей только если identity/appId/baseUrl те же.
@@ -117,6 +126,11 @@ class IntercomWebViewOverlay {
     }
 
     if (_entry != null) {
+      // Старый оверлей заменяется (смена identity). Гасим его таймеры ДО remove:
+      // отложенный _sleepTimer/paused-колбэк старого state не должен выстрелить
+      // после вставки нового entry и снести его (identity-гард в колбэках - вторая
+      // линия защиты).
+      _state?._cancelSleepTimer();
       _entry!.remove();
       _entry!.dispose();
     }
@@ -142,8 +156,17 @@ class IntercomWebViewOverlay {
     await _readyCompleter!.future;
   }
 
-  /// Уничтожить persistent WebView и освободить память.
+  /// Уничтожить WebView и освободить память немедленно.
   static void destroy() {
+    // Гасим таймер старого state ДО обнуления ссылки - инвариант «после destroy
+    // таймеров нет» локален и не зависит от порядка teardown.
+    _state?._cancelSleepTimer();
+    // Висящий await show() (destroy во время загрузки / warm-reopen ещё не
+    // дорезолвился) не должен зависнуть навсегда - завершаем ошибкой.
+    final completer = _readyCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(const IntercomLoadException('Intercom destroyed'));
+    }
     _state = null;
     _entry?.remove();
     _entry?.dispose();
@@ -312,11 +335,26 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Свернули приложение, пока webview спит off-screen - уничтожаем сразу, не ждём
-    // _warmWindow: иначе тёплый webview зря висит в фоне, а deferred-таймер в фоне
-    // фризится и мог бы проснуться спустя часы, убив инстанс не вовремя. Открытый
-    // чат на фоне не трогаем - пользователь вернётся в свой разговор.
-    if (state == AppLifecycleState.paused && _sleeping) {
+    // Свернули/оторвали приложение, пока webview спит off-screen ИЛИ ещё доигрывает
+    // закрытие - уничтожаем сразу, не ждём _warmWindow: иначе тёплый webview зря
+    // висит в фоне, а deferred-таймер/тикер в фоне фризится и мог бы проснуться
+    // спустя часы, убив инстанс не вовремя. Открытый foreground-чат не трогаем -
+    // пользователь вернётся в свой разговор. identity-гард: только актуальный оверлей.
+    final backgrounded = state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached;
+    if (backgrounded &&
+        (_sleeping || _closing) &&
+        IntercomWebViewOverlay._state == this) {
+      IntercomWebViewOverlay.destroy();
+    }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    // Спящий WKWebView/WebView держит renderer-процесс; под memory pressure ОС
+    // прибьёт его и вернёт белый экран. Освобождаем сами, раз чат сейчас не на
+    // экране - тёплый инстанс не настолько ценен, чтобы рисковать OOM.
+    if (_sleeping && IntercomWebViewOverlay._state == this) {
       IntercomWebViewOverlay.destroy();
     }
   }
@@ -476,6 +514,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// Повторное открытие. Из сна - будит webview (reattach из keepAlive), иначе -
   /// сразу JS-показ на тёплом контроллере.
   void _showIntercom() {
+    // Уже просыпаемся (ждём свежий контроллер из reattach) - повторный show
+    // игнорируем: показ дёрнется в _onWebViewCreated, а _controller сейчас обнулён.
+    if (_pendingShowAfterWake) return;
     _showCancelled = false;
     _cancelSleepTimer();
     _interruptClose();
@@ -493,9 +534,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
     if (_sleeping) {
       // Спим: возвращаем InAppWebView в дерево (reattach тёплого инстанса), показ
-      // дёрнем в _onWebViewCreated, когда придёт свежий контроллер. Заглушку
-      // поднимаем сразу - прячет мелькание surface при ремаунте платформ-вью.
+      // дёрнем в _onWebViewCreated, когда придёт свежий контроллер. Контент стартует
+      // за экраном (slide=1), заглушку поднимаем сразу - иначе тёмный фон/surface
+      // ремаунтящегося платформ-вью мелькнул бы фуллскрином до reveal.
       _pendingShowAfterWake = true;
+      _slideController.value = 1;
       setState(() {
         _sleeping = false;
         _covered = true;
@@ -511,6 +554,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// и сработает -> onIntercomReady -> reveal. Тему дублируем через update на случай
   /// смены темы приложения между показами.
   void _doShowJs() {
+    // В waking-фазе контроллера ещё нет (обнулён в _enterSleep) - показ дёрнется
+    // из _onWebViewCreated после reattach, не отсюда.
+    if (_sleeping) return;
     final controller = _controller;
     if (controller == null) return;
     final themeMode =
@@ -529,13 +575,18 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   /// Гасит незавершённую анимацию закрытия: инвалидирует её токен (отложенные
-  /// collapse/finishClose увидят чужой токен и выйдут) и останавливает контроллеры.
+  /// collapse/finishClose увидят чужой токен и выйдут), останавливает контроллеры и
+  /// поднимает непрозрачную заглушку. Без последнего прерванный close оставил бы кадр
+  /// с полупрозрачным fade и снятым AbsorbPointer - тач протёк бы на приложение,
+  /// пока onIntercomReady -> reveal не перерисует корректно.
   void _interruptClose() {
     if (!_closing && _closeToken == null) return;
     _closeToken = null;
     _fadeController.stop();
     _revealController.stop();
     _closing = false;
+    _fadeController.value = 1;
+    setState(() => _covered = true);
   }
 
   /// Уход в сон: убираем webview из дерева (платформ-вью покидает сцену, композитинг
@@ -543,13 +594,20 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// полное уничтожение по истечении _warmWindow.
   void _enterSleep() {
     if (!mounted) return;
+    // Поздний _completeWithError после ухода в сон не должен перезаводить таймер с
+    // нуля - иначе тёплое окно дрейфует дольше _warmWindow от момента закрытия.
+    if (_sleeping) return;
+    // В waking-фазе на этот контроллер полагаться нельзя (он отсоединится при unmount)
+    // - обнуляем, свежий придёт из _onWebViewCreated при reattach.
+    _controller = null;
     setState(() => _sleeping = true);
     _cancelSleepTimer();
     _sleepTimer = Timer(_warmWindow, () {
       // Окно вышло без повторного открытия - уничтожаем webview целиком (память/JS/
-      // chromium-треды). Гард _sleeping закрывает гонку с reopen ровно на тике: если
-      // успели проснуться, не трогаем. Следующий show грузит SDK заново.
-      if (!mounted || !_sleeping) return;
+      // chromium-треды). Гарды: _sleeping закрывает гонку с reopen ровно на тике
+      // (успели проснуться - не трогаем); _state == this - что это всё ещё актуальный
+      // оверлей, а не пересозданный с новой identity. Следующий show грузит SDK заново.
+      if (!mounted || !_sleeping || IntercomWebViewOverlay._state != this) return;
       IntercomWebViewOverlay.destroy();
     });
   }
@@ -599,6 +657,10 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
     void collapse() {
       if (!mounted || _closeToken != token) return;
+      // Уводим контент за экран ПОД непрозрачной заглушкой до её схлопывания: пока
+      // заглушка сужается из фуллскрина в кнопку, иначе webview/тёмный фон торчали бы
+      // из-под неё. Сон (unmount) наступит позже, в finishClose.
+      _slideController.value = 1;
       if (_coverBuilder == null) {
         _revealController.value = 0;
         finishClose();
@@ -625,16 +687,23 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _showCancelled = true;
     _pendingShowAfterWake = false;
     _uncoverTimer?.cancel();
-    // Снимаем заглушку и уводим webview в сон - приложение снова доступно (caller
-    // ушёл на webapp). НЕ держим тёплым за экраном, как раньше: иначе off-screen
-    // платформ-вью композитится впустую. Спящий вью вне сцены, а _warmWindow его
-    // потом уничтожит (быстрый повторный заход в окне всё ещё мгновенный).
-    if (mounted) {
-      setState(() {
-        _intercomVisible = false;
-        _covered = false;
-      });
+    if (!mounted) return;
+    // Снимаем заглушку - приложение снова доступно (caller ушёл на webapp).
+    setState(() {
+      _intercomVisible = false;
+      _covered = false;
+    });
+    if (_sdkLoaded) {
+      // SDK был загружен (это таймаут тёплого reopen) - паркуем webview тёплым,
+      // вне сцены: off-screen платформ-вью больше не композитится впустую, а
+      // _warmWindow потом уничтожит (быстрый повторный заход в окне ещё мгновенный).
       _enterSleep();
+    } else {
+      // ХОЛОДНАЯ загрузка провалилась (прокси/таймаут) - греть нечего, webview
+      // нерабочий. Уничтожаем сразу, не держим зомби-инстанс с chromium-тредами на
+      // весь _warmWindow (это противоречило бы цели фикса); следующий show - заново.
+      _cancelSleepTimer();
+      IntercomWebViewOverlay.destroy();
     }
   }
 
