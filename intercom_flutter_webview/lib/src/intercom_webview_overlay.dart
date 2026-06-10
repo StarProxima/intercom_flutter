@@ -96,13 +96,13 @@ class IntercomWebViewOverlay {
     IntercomCoverBuilder? coverBuilder,
   }) async {
     // Незавершённый Future прошлого show после перезаписи _readyCompleter больше
-    // нигде не хранится - дорезолвим его ошибкой, иначе тот caller висит вечно
-    // (два быстрых show подряд; warm-окно учащает повторные заходы).
+    // нигде не хранится. Завершаем его УСПЕХОМ, а не ошибкой: новый show перехватил
+    // показ (кнопка Support тапабельна, пока идёт ~6с холодная загрузка - дабл-тап
+    // реален), старый caller не «упал». Ошибкой он съел бы попытку retry в
+    // goToSupportChat и мог увести на webapp-fallback при дабл-тапе.
     final prevCompleter = _readyCompleter;
     if (prevCompleter != null && !prevCompleter.isCompleted) {
-      prevCompleter.completeError(
-        const IntercomLoadException('show superseded by a newer show'),
-      );
+      prevCompleter.complete();
     }
     _readyCompleter = Completer<void>();
 
@@ -516,6 +516,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   void _showIntercom() {
     // Уже просыпаемся (ждём свежий контроллер из reattach) - повторный show
     // игнорируем: показ дёрнется в _onWebViewCreated, а _controller сейчас обнулён.
+    // Future нового caller'а застрахован fallback-таймером первого show (он взведён
+    // при входе в waking-ветку) - отдельный таймаут тут не нужен.
     if (_pendingShowAfterWake) return;
     _showCancelled = false;
     _cancelSleepTimer();
@@ -548,6 +550,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
     if (_controller == null) return;
     _doShowJs();
+    // Чат уже на экране (повторный show с той же identity): onShow повторно НЕ
+    // придёт, значит onIntercomReady не дёрнет _completeReady - резолвим future
+    // сразу, иначе await show() висит (его fallback-таймер молчит: гард
+    // !_intercomVisible ложен на видимом чате).
+    if (_intercomVisible && !_covered && !_closing) _completeReady();
   }
 
   /// JS-показ на текущем (тёплом) контроллере. onShow-хук стоит с initial-загрузки
