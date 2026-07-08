@@ -9,9 +9,7 @@ class IntercomHtmlBuilder {
   final String? email;
   final String? userHash;
 
-  /// Intercom JWT (identity verification через токен вместо user_hash). Если
-  /// задан - идентификация идёт по claims токена, а user_id/email/user_hash в
-  /// intercomSettings не кладутся.
+  /// Intercom JWT для identity verification (альтернатива user_hash).
   final String? userJwt;
   final String? userName;
 

@@ -15,6 +15,7 @@ class IntercomWebViewScreen extends StatefulWidget {
   final String? userId;
   final String? email;
   final String? userHash;
+  final String? userJwt;
   final String? userName;
   final ProxyConfig? proxyConfig;
 
@@ -31,6 +32,7 @@ class IntercomWebViewScreen extends StatefulWidget {
     this.userId,
     this.email,
     this.userHash,
+    this.userJwt,
     this.userName,
     this.proxyConfig,
     this.baseUrl = 'https://app.intercom.io',
@@ -116,6 +118,7 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
       userId: widget.userId,
       email: widget.email,
       userHash: widget.userHash,
+      userJwt: widget.userJwt,
       userName: widget.userName,
       colorScheme: isDark ? 'dark' : 'light',
       backgroundColorCss: bgCss,
