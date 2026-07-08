@@ -80,6 +80,7 @@ class IntercomWebViewOverlay {
     String? userId,
     String? email,
     String? userHash,
+    String? userJwt,
     String? userName,
     Map<String, dynamic>? customAttributes,
     ProxyConfig? proxyConfig,
@@ -117,6 +118,7 @@ class IntercomWebViewOverlay {
           userId: userId,
           email: email,
           userHash: userHash,
+          userJwt: userJwt,
           baseUrl: baseUrl,
         )) {
       _state!._coverBuilder = coverBuilder;
@@ -141,6 +143,7 @@ class IntercomWebViewOverlay {
       userId: userId,
       email: email,
       userHash: userHash,
+      userJwt: userJwt,
       userName: userName,
       customAttributes: customAttributes,
       proxyConfig: proxyConfig,
@@ -186,6 +189,7 @@ class _OverlayWidget extends StatefulWidget {
   final String? userId;
   final String? email;
   final String? userHash;
+  final String? userJwt;
   final String? userName;
   final Map<String, dynamic>? customAttributes;
   final ProxyConfig? proxyConfig;
@@ -199,6 +203,7 @@ class _OverlayWidget extends StatefulWidget {
     this.userId,
     this.email,
     this.userHash,
+    this.userJwt,
     this.userName,
     this.customAttributes,
     this.proxyConfig,
@@ -503,12 +508,14 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     required String? userId,
     required String? email,
     required String? userHash,
+    required String? userJwt,
     required String baseUrl,
   }) =>
       widget.appId == appId &&
       widget.userId == userId &&
       widget.email == email &&
       widget.userHash == userHash &&
+      widget.userJwt == userJwt &&
       widget.baseUrl == baseUrl;
 
   /// Повторное открытие. Из сна - будит webview (reattach из keepAlive), иначе -
@@ -897,6 +904,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       userId: widget.userId,
       email: widget.email,
       userHash: widget.userHash,
+      userJwt: widget.userJwt,
       userName: widget.userName,
       customAttributes: widget.customAttributes,
       colorScheme: isDark ? 'dark' : 'light',
