@@ -118,7 +118,6 @@ class IntercomWebViewOverlay {
           userId: userId,
           email: email,
           userHash: userHash,
-          userJwt: userJwt,
           baseUrl: baseUrl,
         )) {
       _state!._coverBuilder = coverBuilder;
@@ -503,19 +502,22 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   /// Тёплый оверлей валиден для reuse только при совпадении identity/appId/baseUrl.
+  // userJwt намеренно НЕ сравниваем: Intercom-токен ротируется на каждый getMe,
+  // сверка по нему убила бы warm-reuse (почти всегда mismatch -> полная
+  // перезагрузка). Идентичность держит стабильный userId (JWT-режим) / userHash
+  // (hash-режим). Тёплое окно (секунды) короче срока жизни токена, так что
+  // переиспользованная сессия остаётся с валидной identity.
   bool _matchesShowConfig({
     required String appId,
     required String? userId,
     required String? email,
     required String? userHash,
-    required String? userJwt,
     required String baseUrl,
   }) =>
       widget.appId == appId &&
       widget.userId == userId &&
       widget.email == email &&
       widget.userHash == userHash &&
-      widget.userJwt == userJwt &&
       widget.baseUrl == baseUrl;
 
   /// Повторное открытие. Из сна - будит webview (reattach из keepAlive), иначе -
