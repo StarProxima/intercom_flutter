@@ -269,6 +269,9 @@ class _IntercomWebViewScreenState extends State<IntercomWebViewScreen> {
   InAppWebViewSettings _buildSettings() {
     final settings = InAppWebViewSettings(
       javaScriptEnabled: true,
+      // Эфемерный web-store: сессия Intercom не персистится между аккаунтами/
+      // запусками (identity восстанавливается из JWT на каждый boot).
+      incognito: true,
       // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
       // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
       mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,

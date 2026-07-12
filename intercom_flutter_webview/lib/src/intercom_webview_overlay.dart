@@ -502,11 +502,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   /// Тёплый оверлей валиден для reuse только при совпадении identity/appId/baseUrl.
-  // userJwt намеренно НЕ сравниваем: Intercom-токен ротируется на каждый getMe,
-  // сверка по нему убила бы warm-reuse (почти всегда mismatch -> полная
-  // перезагрузка). Идентичность держит стабильный userId (JWT-режим) / userHash
-  // (hash-режим). Тёплое окно (секунды) короче срока жизни токена, так что
-  // переиспользованная сессия остаётся с валидной identity.
+  /// userJwt намеренно вне сверки: Intercom-токен ротируется на каждый getMe,
+  /// сверка по нему почти всегда давала бы mismatch и убивала warm-reuse.
+  /// Идентичность держит стабильный userId (JWT-режим) / userHash (hash-режим).
   bool _matchesShowConfig({
     required String appId,
     required String? userId,
@@ -952,6 +950,12 @@ class _IntercomWebView extends StatelessWidget {
       initialUrlRequest: initialUrlRequest,
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
+        // Эфемерный web-store: куки/localStorage сессии Intercom не оседают в
+        // общий стор приложения и не переживают пересоздание вебвью. Иначе после
+        // смены аккаунта на устройстве анонимный заход подхватил бы сессию
+        // прошлого юзера и показал его переписку. Identity восстанавливается из
+        // JWT на каждый boot - персистить нечего.
+        incognito: true,
         // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
         // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
         mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
