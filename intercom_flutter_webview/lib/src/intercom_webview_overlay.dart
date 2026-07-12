@@ -176,6 +176,21 @@ class IntercomWebViewOverlay {
     _readyCompleter = null;
   }
 
+  /// Гасит оверлей и чистит web-сессию Intercom (куки + web-storage) из общего
+  /// стора приложения. Звать на logout: кука визитора переживает dispose вебвью и
+  /// живёт дольше JWT, иначе анонимный заход следующего аккаунта на устройстве
+  /// подхватил бы чужую сессию. Куки - основной носитель сессии и снимаются на
+  /// обеих платформах; web-storage подчищаем best-effort.
+  static Future<void> clearSession() async {
+    destroy();
+    await CookieManager.instance().deleteAllCookies();
+    try {
+      await WebStorageManager.instance().deleteAllData();
+    } on Object catch (_) {
+      // iOS: deleteAllData не реализован. Куки (носитель сессии) уже сняты выше.
+    }
+  }
+
   /// SDK загружен и WebView живой.
   static bool get isInitialized =>
       _state != null && _state!.mounted && _state!._sdkLoaded;
@@ -950,12 +965,6 @@ class _IntercomWebView extends StatelessWidget {
       initialUrlRequest: initialUrlRequest,
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
-        // Эфемерный web-store: куки/localStorage сессии Intercom не оседают в
-        // общий стор приложения и не переживают пересоздание вебвью. Иначе после
-        // смены аккаунта на устройстве анонимный заход подхватил бы сессию
-        // прошлого юзера и показал его переписку. Identity восстанавливается из
-        // JWT на каждый boot - персистить нечего.
-        incognito: true,
         // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
         // блокируем mixed content, иначе MITM сможет инжектить http-ресурсы.
         mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
