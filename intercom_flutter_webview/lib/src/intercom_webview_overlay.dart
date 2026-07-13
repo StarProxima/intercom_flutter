@@ -80,6 +80,7 @@ class IntercomWebViewOverlay {
     String? userId,
     String? email,
     String? userHash,
+    String? userJwt,
     String? userName,
     Map<String, dynamic>? customAttributes,
     ProxyConfig? proxyConfig,
@@ -141,6 +142,7 @@ class IntercomWebViewOverlay {
       userId: userId,
       email: email,
       userHash: userHash,
+      userJwt: userJwt,
       userName: userName,
       customAttributes: customAttributes,
       proxyConfig: proxyConfig,
@@ -174,6 +176,21 @@ class IntercomWebViewOverlay {
     _readyCompleter = null;
   }
 
+  /// Гасит оверлей и чистит web-сессию Intercom (куки + web-storage) из общего
+  /// стора приложения. Звать на logout: кука визитора переживает dispose вебвью и
+  /// живёт дольше JWT, иначе анонимный заход следующего аккаунта на устройстве
+  /// подхватил бы чужую сессию. Куки - основной носитель сессии и снимаются на
+  /// обеих платформах; web-storage подчищаем best-effort.
+  static Future<void> clearSession() async {
+    destroy();
+    await CookieManager.instance().deleteAllCookies();
+    try {
+      await WebStorageManager.instance().deleteAllData();
+    } on Object catch (_) {
+      // iOS: deleteAllData не реализован. Куки (носитель сессии) уже сняты выше.
+    }
+  }
+
   /// SDK загружен и WebView живой.
   static bool get isInitialized =>
       _state != null && _state!.mounted && _state!._sdkLoaded;
@@ -186,6 +203,7 @@ class _OverlayWidget extends StatefulWidget {
   final String? userId;
   final String? email;
   final String? userHash;
+  final String? userJwt;
   final String? userName;
   final Map<String, dynamic>? customAttributes;
   final ProxyConfig? proxyConfig;
@@ -199,6 +217,7 @@ class _OverlayWidget extends StatefulWidget {
     this.userId,
     this.email,
     this.userHash,
+    this.userJwt,
     this.userName,
     this.customAttributes,
     this.proxyConfig,
@@ -498,6 +517,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   /// Тёплый оверлей валиден для reuse только при совпадении identity/appId/baseUrl.
+  /// userJwt намеренно вне сверки: Intercom-токен ротируется на каждый getMe,
+  /// сверка по нему почти всегда давала бы mismatch и убивала warm-reuse.
+  /// Идентичность держит стабильный userId (JWT-режим) / userHash (hash-режим).
   bool _matchesShowConfig({
     required String appId,
     required String? userId,
@@ -897,6 +919,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       userId: widget.userId,
       email: widget.email,
       userHash: widget.userHash,
+      userJwt: widget.userJwt,
       userName: widget.userName,
       customAttributes: widget.customAttributes,
       colorScheme: isDark ? 'dark' : 'light',

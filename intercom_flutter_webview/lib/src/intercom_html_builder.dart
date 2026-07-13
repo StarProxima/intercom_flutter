@@ -8,6 +8,9 @@ class IntercomHtmlBuilder {
   final String? userId;
   final String? email;
   final String? userHash;
+
+  /// Intercom JWT для identity verification (альтернатива user_hash).
+  final String? userJwt;
   final String? userName;
 
   /// Произвольные атрибуты для Intercom.
@@ -34,6 +37,7 @@ class IntercomHtmlBuilder {
     this.userId,
     this.email,
     this.userHash,
+    this.userJwt,
     this.userName,
     this.customAttributes,
     this.colorScheme = 'light',
@@ -62,10 +66,19 @@ class IntercomHtmlBuilder {
       "theme_mode: '$colorScheme'",
     ];
 
-    if (userId != null) settingsEntries.add("user_id: '${_escapeJs(userId!)}'");
-    if (email != null) settingsEntries.add("email: '${_escapeJs(email!)}'");
-    if (userHash != null) {
-      settingsEntries.add("user_hash: '${_escapeJs(userHash!)}'");
+    if (userJwt != null) {
+      // Identity целиком в claims токена. При включённой в workspace JWT-
+      // верификации Intercom отвергает сырые user_id/email/user_hash - шлём
+      // только сам токен.
+      settingsEntries.add("intercom_user_jwt: '${_escapeJs(userJwt!)}'");
+    } else {
+      if (userId != null) {
+        settingsEntries.add("user_id: '${_escapeJs(userId!)}'");
+      }
+      if (email != null) settingsEntries.add("email: '${_escapeJs(email!)}'");
+      if (userHash != null) {
+        settingsEntries.add("user_hash: '${_escapeJs(userHash!)}'");
+      }
     }
     if (userName != null) settingsEntries.add("name: '${_escapeJs(userName!)}'");
 
