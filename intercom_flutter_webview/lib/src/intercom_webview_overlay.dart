@@ -8,7 +8,6 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'intercom_html_builder.dart';
-import 'intercom_local_page_server.dart';
 import 'proxy_config.dart';
 
 /// Исключение при неудачной загрузке Intercom.
@@ -287,11 +286,16 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // не должен всплывать поверх caller'а, ушедшего на webapp-fallback.
   bool _showCancelled = false;
   Timer? _fallbackTimer;
-  IntercomLocalPageServer? _pageServer;
-  Uri? _pageUri;
+  // Временная папка с index.html мессенджера - WebView2 отдаёт её содержимое
+  // под именем хоста из baseUrl (virtual host mapping), без сети.
+  Directory? _pageDir;
   // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
   DateTime? _showStartedAt;
 
+  // Windows: WebView2 не умеет loadData с baseUrl, поэтому страница подаётся
+  // локальным файлом через virtual host mapping - документ получает origin
+  // https://<хост из baseUrl>. Хост обязан быть в trusted domains воркспейса
+  // Intercom, с другого origin лоадер молча не поднимает мессенджер.
   bool get _useLocalPageMode => Platform.isWindows;
 
   @override
@@ -345,7 +349,14 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // InAppWebView уже unmount'нут (dispose детей раньше родителя), поэтому
     // disposeKeepAlive безопасен (вью вне дерева).
     unawaited(InAppWebViewController.disposeKeepAlive(_keepAlive));
-    unawaited(_pageServer?.close() ?? Future<void>.value());
+    // Не удалилась (файл залочен и т.п.) - не страшно: это системный temp,
+    // ОС/пользователь его чистят штатно.
+    final pageDir = _pageDir;
+    if (pageDir != null) {
+      unawaited(
+        pageDir.delete(recursive: true).then((_) {}, onError: (_) {}),
+      );
+    }
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy(owner: this);
     }
@@ -431,23 +442,33 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       }
     }
     if (_useLocalPageMode) {
-      await _setupLocalPage();
+      try {
+        await _writeLocalPage();
+      } on Object catch (e) {
+        // Ошибка подготовки страницы - рвём show сразу с причиной, а не
+        // молчим до fallback-таймера: caller уйдёт на webapp быстро, а в логе
+        // останется что именно упало.
+        _completeWithError(
+          IntercomLoadException('Failed to prepare local page: $e'),
+        );
+
+        return;
+      }
     }
     if (mounted) setState(() => _proxyReady = true);
   }
 
-  Future<void> _setupLocalPage() async {
-    final pageServer = await IntercomLocalPageServer.start(
-      html: _buildOverlayHtml(),
-    );
+  Future<void> _writeLocalPage() async {
+    final dir = await Directory.systemTemp.createTemp('intercom_page_');
+    final file = File('${dir.path}${Platform.pathSeparator}index.html');
+    await file.writeAsString(_buildOverlayHtml());
 
     if (!mounted) {
-      await pageServer.close();
+      await dir.delete(recursive: true);
       return;
     }
 
-    _pageServer = pageServer;
-    _pageUri = pageServer.entryUri;
+    _pageDir = dir;
   }
 
   /// Прошло ms с момента старта show (создания виджета).
@@ -759,7 +780,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   @override
   Widget build(BuildContext context) {
-    if (!_proxyReady || (_useLocalPageMode && _pageUri == null)) {
+    if (!_proxyReady || (_useLocalPageMode && _pageDir == null)) {
       return const SizedBox.shrink();
     }
 
@@ -815,9 +836,6 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                       child: _IntercomWebView(
                         webViewKey: _webViewKey,
                         keepAlive: _keepAlive,
-                        initialUrlRequest: _useLocalPageMode
-                            ? URLRequest(url: WebUri(_pageUri.toString()))
-                            : null,
                         proxyConfig: widget.proxyConfig,
                         originHost: Uri.parse(widget.baseUrl).host,
                         onCreated: _onWebViewCreated,
@@ -898,7 +916,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       },
     );
 
-    if (_useLocalPageMode) return;
+    if (_useLocalPageMode) {
+      unawaited(_loadLocalPage(controller));
+
+      return;
+    }
 
     controller.loadData(
       data: _buildOverlayHtml(),
@@ -906,6 +928,45 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       mimeType: 'text/html',
       encoding: 'utf-8',
     );
+  }
+
+  /// Windows: маппит хост из baseUrl на временную папку со страницей и грузит
+  /// её как https://<хост>/index.html. Маппинг обязан встать ДО навигации -
+  /// поэтому вебвью создаётся без initialUrlRequest, а loadUrl зовётся только
+  /// после подтверждения маппинга. Любой сбой рвёт show с причиной сразу,
+  /// не дожидаясь fallback-таймера.
+  Future<void> _loadLocalPage(InAppWebViewController controller) async {
+    final host = Uri.parse(widget.baseUrl).host;
+    final pageDir = _pageDir;
+    if (pageDir == null) {
+      _completeWithError(
+        const IntercomLoadException('Local page directory is missing.'),
+      );
+
+      return;
+    }
+    try {
+      final mapped = await controller.setVirtualHostNameToFolderMapping(
+        hostName: host,
+        folderPath: pageDir.path,
+      );
+      if (!mapped) {
+        _completeWithError(
+          const IntercomLoadException(
+            'Failed to map virtual host for the local page.',
+          ),
+        );
+
+        return;
+      }
+      await controller.loadUrl(
+        urlRequest: URLRequest(url: WebUri('https://$host/index.html')),
+      );
+    } on Object catch (e) {
+      _completeWithError(
+        IntercomLoadException('Failed to load local page: $e'),
+      );
+    }
   }
 
   String _buildOverlayHtml() {
@@ -930,15 +991,14 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 }
 
-/// WebView с Intercom Web Messenger: загрузка по [initialUrlRequest] (локальный
-/// режим) либо через `loadData` в [onCreated]. Внешние ссылки уходят в системный
-/// браузер, прокси-авторизация и server-trust обрабатываются здесь. [elapsedMs] -
-/// для относительных таймингов в debug-логах.
+/// WebView с Intercom Web Messenger: контент грузит [onCreated] (`loadData`,
+/// на Windows - virtual host mapping + `loadUrl`). Внешние ссылки уходят в
+/// системный браузер, прокси-авторизация и server-trust обрабатываются здесь.
+/// [elapsedMs] - для относительных таймингов в debug-логах.
 class _IntercomWebView extends StatelessWidget {
   const _IntercomWebView({
     required this.webViewKey,
     required this.keepAlive,
-    required this.initialUrlRequest,
     required this.proxyConfig,
     required this.originHost,
     required this.onCreated,
@@ -949,7 +1009,6 @@ class _IntercomWebView extends StatelessWidget {
   // Тёплый токен: при unmount native webview паркуется в пуле, при remount
   // (пробуждение из сна) возвращается тем же - без перезагрузки SDK.
   final InAppWebViewKeepAlive keepAlive;
-  final URLRequest? initialUrlRequest;
   final ProxyConfig? proxyConfig;
   // Хост страницы мессенджера (из baseUrl) - его навигации держим в вебвью,
   // остальные внешние хосты уводим в системный браузер (см. _shouldKeepInWebView).
@@ -962,7 +1021,6 @@ class _IntercomWebView extends StatelessWidget {
     return InAppWebView(
       key: webViewKey,
       keepAlive: keepAlive,
-      initialUrlRequest: initialUrlRequest,
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
         // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
@@ -1115,7 +1173,6 @@ class _IntercomWebView extends StatelessWidget {
   bool _shouldKeepInWebView(WebUri uri) {
     final scheme = uri.scheme.toLowerCase();
     if (scheme == 'about' || scheme == 'data' || scheme == 'blob') return true;
-    if (_isLoopbackUri(uri)) return true;
 
     final host = uri.host.toLowerCase();
 
@@ -1133,10 +1190,6 @@ class _IntercomWebView extends StatelessWidget {
     return domains.any((d) => host == d || host.endsWith('.$d'));
   }
 
-  bool _isLoopbackUri(WebUri uri) {
-    final host = uri.host.toLowerCase();
-    return host == '127.0.0.1' || host == 'localhost';
-  }
 }
 
 /// Дефолтная заглушка (когда [IntercomCoverBuilder] не задан): на весь экран
