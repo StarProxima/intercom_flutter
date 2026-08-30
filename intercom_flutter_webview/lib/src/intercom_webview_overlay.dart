@@ -24,11 +24,12 @@ class IntercomLoadException implements Exception {
 /// виден вебвью; 1 - непрозрачно). Пакет владеет хореографией (гонит контроллеры),
 /// а сам визуал перехода задаёт приложение - чтобы анимация, привязанная к
 /// конкретной кнопке, жила в app, а не в пакете. null - дефолтная заглушка.
-typedef IntercomCoverBuilder = Widget Function(
-  BuildContext context,
-  Animation<double> reveal,
-  Animation<double> fade,
-);
+typedef IntercomCoverBuilder =
+    Widget Function(
+      BuildContext context,
+      Animation<double> reveal,
+      Animation<double> fade,
+    );
 
 /// Сколько держать webview тёплым после закрытия чата, прежде чем уничтожить.
 ///
@@ -170,8 +171,7 @@ class IntercomWebViewOverlay {
     // дорезолвился) не должен зависнуть навсегда - завершаем ошибкой.
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
-      completer
-          .completeError(const IntercomLoadException('Intercom destroyed'));
+      completer.completeError(const IntercomLoadException('Intercom destroyed'));
     }
     _state = null;
     _entry?.remove();
@@ -195,7 +195,15 @@ class IntercomWebViewOverlay {
     }
     // Windows: страница с identity лежит файлом в temp - контракт "после
     // clearSession следов сессии нет" требует дождаться удаления, а не
-    // отдать его best-effort фону.
+    // отдать его best-effort фону. Два случая: dispose оверлея уже запустил
+    // удаление сам (destroy() выше снимает entry, но unmount приходит кадром
+    // позже и мог выиграть гонку у await-ов кук/стораджа) - ждём его Future;
+    // либо dispose ещё не был - удаляем сами.
+    final pendingDeletion = _OverlayWidgetState._lastPageDeletion;
+    if (pendingDeletion != null) {
+      await pendingDeletion;
+      _OverlayWidgetState._lastPageDeletion = null;
+    }
     final pageDir = _OverlayWidgetState._lastPageDir;
     if (pageDir != null) {
       try {
@@ -313,9 +321,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // от _pageDir: файл удаляется сразу после загрузки SDK (в нём identity), а
   // вебвью при этом остаётся в дереве.
   bool _localPageReady = false;
-  // Последняя папка страницы за жизнь процесса - для awaited-зачистки на
-  // logout (clearSession), когда state уже уничтожен.
+  // Последняя папка страницы за жизнь процесса и Future её удаления - для
+  // awaited-зачистки на logout (clearSession): dispose мог уже запустить
+  // удаление сам, тогда clearSession ждёт этот Future, а не потерянную ссылку.
   static Directory? _lastPageDir;
+  static Future<void>? _lastPageDeletion;
   // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
   DateTime? _showStartedAt;
 
@@ -424,8 +434,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // Без клейма didPopRoute сюда не доходит (вызывается лишь как fallback, когда
   // жест не заклеймлен).
   @override
-  bool handleStartBackGesture(PredictiveBackEvent backEvent) =>
-      _intercomVisible;
+  bool handleStartBackGesture(PredictiveBackEvent backEvent) => _intercomVisible;
 
   @override
   void handleCommitBackGesture() {
@@ -480,8 +489,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   Future<void> _writeLocalPage() async {
-    _sweepStalePageDirs();
-    final dir = await Directory.systemTemp.createTemp('intercom_page_');
+    // Свой подкаталог, а не системный temp напрямую: sweep ниже обходит
+    // только его, не листая тысячи чужих записей %TEMP%.
+    final parent = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}intercom_pages');
+    await parent.create(recursive: true);
+    final dir = await parent.createTemp('page_');
     try {
       final file = File('${dir.path}${Platform.pathSeparator}index.html');
       await file.writeAsString(_buildOverlayHtml());
@@ -500,26 +513,33 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _pageDir = dir;
     _lastPageDir = dir;
     _localPageReady = true;
+    _sweepStalePageDirs(parent, current: dir);
   }
 
   /// Остатки страниц прошлых запусков (краш/kill до dispose) - в них лежит
-  /// identity, копиться в temp они не должны. Текущей папки здесь ещё нет.
-  void _sweepStalePageDirs() {
-    try {
-      for (final entry in Directory.systemTemp.listSync()) {
-        if (entry is! Directory) continue;
-        final name = entry.uri.pathSegments
-            .lastWhere((s) => s.isNotEmpty, orElse: () => '');
-        if (!name.startsWith('intercom_page_')) continue;
-        try {
-          entry.deleteSync(recursive: true);
-        } on Object {
-          // Залоченная папка подождёт следующего запуска.
+  /// identity, копиться в temp они не должны. Асинхронно и после подготовки
+  /// текущей страницы: блокирующий диск-обход в момент тапа по "Поддержке"
+  /// ронял бы кадры анимации показа. Свежие папки (моложе часа) не трогаем -
+  /// они могут принадлежать живому соседнему инстансу приложения, у которого
+  /// страница ещё грузится; своя жизнь у страницы - секунды.
+  void _sweepStalePageDirs(Directory parent, {required Directory current}) {
+    unawaited(() async {
+      try {
+        await for (final entry in parent.list()) {
+          if (entry is! Directory || entry.path == current.path) continue;
+          try {
+            final stat = await entry.stat();
+            final age = DateTime.now().difference(stat.modified);
+            if (age < const Duration(hours: 1)) continue;
+            await entry.delete(recursive: true);
+          } on Object {
+            // Залоченная папка подождёт следующего запуска.
+          }
         }
+      } on Object {
+        // Недоступный listing не должен ронять подготовку страницы.
       }
-    } on Object {
-      // Недоступный listing temp не должен ронять подготовку страницы.
-    }
+    }());
   }
 
   /// Удаляет страницу с диска, как только она стала не нужна (SDK загружен
@@ -528,8 +548,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     final dir = _pageDir;
     if (dir == null) return;
     _pageDir = null;
-    if (identical(_lastPageDir, dir)) _lastPageDir = null;
-    unawaited(dir.delete(recursive: true).then((_) {}, onError: (_) {}));
+    final deletion = dir.delete(recursive: true).then((_) {}, onError: (_) {});
+    if (identical(_lastPageDir, dir)) {
+      _lastPageDir = null;
+      _lastPageDeletion = deletion;
+    }
+    unawaited(deletion);
   }
 
   /// Прошло ms с момента старта show (создания виджета).
@@ -721,8 +745,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       // chromium-треды). Гарды: _sleeping закрывает гонку с reopen ровно на тике
       // (успели проснуться - не трогаем); _state == this - что это всё ещё актуальный
       // оверлей, а не пересозданный с новой identity. Следующий show грузит SDK заново.
-      if (!mounted || !_sleeping || IntercomWebViewOverlay._state != this)
-        return;
+      if (!mounted || !_sleeping || IntercomWebViewOverlay._state != this) return;
       IntercomWebViewOverlay.destroy();
     });
   }
@@ -879,11 +902,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
               position:
                   Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1))
                       .animate(
-                CurvedAnimation(
-                  parent: _slideController,
-                  curve: Curves.easeInCubic,
-                ),
-              ),
+                        CurvedAnimation(
+                          parent: _slideController,
+                          curve: Curves.easeInCubic,
+                        ),
+                      ),
               child: Stack(
                 children: [
                   Positioned.fill(
