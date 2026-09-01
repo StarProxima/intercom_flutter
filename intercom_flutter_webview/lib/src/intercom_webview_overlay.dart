@@ -8,7 +8,6 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'intercom_html_builder.dart';
-import 'intercom_local_page_server.dart';
 import 'proxy_config.dart';
 
 /// Исключение при неудачной загрузке Intercom.
@@ -132,6 +131,11 @@ class IntercomWebViewOverlay {
       // после вставки нового entry и снести его (identity-гард в колбэках - вторая
       // линия защиты).
       _state?._cancelSleepTimer();
+      // Show старого оверлея отменён: его висящие async-цепочки (прокси,
+      // загрузка страницы) не должны завершать ошибкой completer НОВОГО show -
+      // unmount произойдёт только на следующем кадре, гард по mounted этот
+      // зазор не закрывает.
+      _state?._showCancelled = true;
       _entry!.remove();
       _entry!.dispose();
     }
@@ -188,6 +192,29 @@ class IntercomWebViewOverlay {
       await WebStorageManager.instance().deleteAllData();
     } on Object catch (_) {
       // iOS: deleteAllData не реализован. Куки (носитель сессии) уже сняты выше.
+    }
+    // Windows: страница с identity лежит файлом в temp - контракт "после
+    // clearSession следов сессии нет" требует дождаться удаления, а не
+    // отдать его best-effort фону. Два случая: dispose оверлея уже запустил
+    // удаление сам (destroy() выше снимает entry, но unmount приходит кадром
+    // позже и мог выиграть гонку у await-ов кук/стораджа) - ждём его Future;
+    // либо dispose ещё не был - удаляем сами.
+    final pendingDeletion = _OverlayWidgetState._lastPageDeletion;
+    if (pendingDeletion != null) {
+      await pendingDeletion;
+      _OverlayWidgetState._lastPageDeletion = null;
+    }
+    final pageDir = _OverlayWidgetState._lastPageDir;
+    if (pageDir != null) {
+      try {
+        await pageDir.delete(recursive: true);
+        _OverlayWidgetState._lastPageDir = null;
+      } on PathNotFoundException {
+        _OverlayWidgetState._lastPageDir = null;
+      } on Object catch (e) {
+        debugPrint(
+            '[Intercom WebView] failed to delete page dir on logout: $e');
+      }
     }
   }
 
@@ -287,11 +314,25 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // не должен всплывать поверх caller'а, ушедшего на webapp-fallback.
   bool _showCancelled = false;
   Timer? _fallbackTimer;
-  IntercomLocalPageServer? _pageServer;
-  Uri? _pageUri;
+  // Временная папка с index.html мессенджера - WebView2 отдаёт её содержимое
+  // под именем хоста из baseUrl (virtual host mapping), без сети.
+  Directory? _pageDir;
+  // Страница записана и готова к маппингу (гейт монтирования вебвью). Отдельно
+  // от _pageDir: файл удаляется сразу после загрузки SDK (в нём identity), а
+  // вебвью при этом остаётся в дереве.
+  bool _localPageReady = false;
+  // Последняя папка страницы за жизнь процесса и Future её удаления - для
+  // awaited-зачистки на logout (clearSession): dispose мог уже запустить
+  // удаление сам, тогда clearSession ждёт этот Future, а не потерянную ссылку.
+  static Directory? _lastPageDir;
+  static Future<void>? _lastPageDeletion;
   // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
   DateTime? _showStartedAt;
 
+  // Windows: WebView2 не умеет loadData с baseUrl, поэтому страница подаётся
+  // локальным файлом через virtual host mapping - документ получает origin
+  // https://<хост из baseUrl>. Хост обязан быть в trusted domains воркспейса
+  // Intercom, с другого origin лоадер молча не поднимает мессенджер.
   bool get _useLocalPageMode => Platform.isWindows;
 
   @override
@@ -345,7 +386,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // InAppWebView уже unmount'нут (dispose детей раньше родителя), поэтому
     // disposeKeepAlive безопасен (вью вне дерева).
     unawaited(InAppWebViewController.disposeKeepAlive(_keepAlive));
-    unawaited(_pageServer?.close() ?? Future<void>.value());
+    _deleteLocalPage();
     if (widget.proxyConfig != null) {
       ProxyConfig.clearProxy(owner: this);
     }
@@ -431,23 +472,88 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       }
     }
     if (_useLocalPageMode) {
-      await _setupLocalPage();
+      try {
+        await _writeLocalPage();
+      } on Object catch (e) {
+        // Ошибка подготовки страницы - рвём show сразу с причиной, а не
+        // молчим до fallback-таймера: caller уйдёт на webapp быстро, а в логе
+        // останется что именно упало.
+        _completeWithError(
+          IntercomLoadException('Failed to prepare local page: $e'),
+        );
+
+        return;
+      }
     }
     if (mounted) setState(() => _proxyReady = true);
   }
 
-  Future<void> _setupLocalPage() async {
-    final pageServer = await IntercomLocalPageServer.start(
-      html: _buildOverlayHtml(),
-    );
+  Future<void> _writeLocalPage() async {
+    // Свой подкаталог, а не системный temp напрямую: sweep ниже обходит
+    // только его, не листая тысячи чужих записей %TEMP%.
+    final parent = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}intercom_pages');
+    await parent.create(recursive: true);
+    final dir = await parent.createTemp('page_');
+    try {
+      final file = File('${dir.path}${Platform.pathSeparator}index.html');
+      await file.writeAsString(_buildOverlayHtml());
+    } on Object {
+      // Папка без отслеживания (_pageDir не присвоен) утекла бы навсегда -
+      // а недописанный файл уже может содержать identity.
+      await dir.delete(recursive: true);
+      rethrow;
+    }
 
     if (!mounted) {
-      await pageServer.close();
+      await dir.delete(recursive: true);
       return;
     }
 
-    _pageServer = pageServer;
-    _pageUri = pageServer.entryUri;
+    _pageDir = dir;
+    _lastPageDir = dir;
+    _localPageReady = true;
+    _sweepStalePageDirs(parent, current: dir);
+  }
+
+  /// Остатки страниц прошлых запусков (краш/kill до dispose) - в них лежит
+  /// identity, копиться в temp они не должны. Асинхронно и после подготовки
+  /// текущей страницы: блокирующий диск-обход в момент тапа по "Поддержке"
+  /// ронял бы кадры анимации показа. Свежие папки (моложе часа) не трогаем -
+  /// они могут принадлежать живому соседнему инстансу приложения, у которого
+  /// страница ещё грузится; своя жизнь у страницы - секунды.
+  void _sweepStalePageDirs(Directory parent, {required Directory current}) {
+    unawaited(() async {
+      try {
+        await for (final entry in parent.list()) {
+          if (entry is! Directory || entry.path == current.path) continue;
+          try {
+            final stat = await entry.stat();
+            final age = DateTime.now().difference(stat.modified);
+            if (age < const Duration(hours: 1)) continue;
+            await entry.delete(recursive: true);
+          } on Object {
+            // Залоченная папка подождёт следующего запуска.
+          }
+        }
+      } on Object {
+        // Недоступный listing не должен ронять подготовку страницы.
+      }
+    }());
+  }
+
+  /// Удаляет страницу с диска, как только она стала не нужна (SDK загружен
+  /// либо оверлей умирает): identity не должна лежать в temp дольше загрузки.
+  void _deleteLocalPage() {
+    final dir = _pageDir;
+    if (dir == null) return;
+    _pageDir = null;
+    final deletion = dir.delete(recursive: true).then((_) {}, onError: (_) {});
+    if (identical(_lastPageDir, dir)) {
+      _lastPageDir = null;
+      _lastPageDeletion = deletion;
+    }
+    unawaited(deletion);
   }
 
   /// Прошло ms с момента старта show (создания виджета).
@@ -461,6 +567,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // show шёл по мгновенной ветке - даже если текущий show уже отменён.
     _sdkLoaded = true;
     _fallbackTimer?.cancel();
+    // SDK загружен - файл с identity на диске больше не нужен, чем короче он
+    // живёт, тем уже окно чтения токена чужим процессом.
+    _deleteLocalPage();
     if (kDebugMode) {
       debugPrint(
         '[Intercom WebView] onIntercomReady +${_elapsedMs()}ms '
@@ -708,6 +817,14 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   void _completeWithError(Object error) {
+    // Ошибка от уже вытесненного/уничтоженного оверлея (висящий await из
+    // _prepareOverlay/_loadLocalPage дострелил после dispose или в кадровом
+    // зазоре supersede) не должна бить в статический completer: он уже
+    // принадлежит следующему show, и его future тот, кто сносил этот оверлей,
+    // разрешил сам. Гард по образцу _sleepTimer.
+    if (!mounted || _showCancelled || IntercomWebViewOverlay._state != this) {
+      return;
+    }
     final c = IntercomWebViewOverlay._readyCompleter;
     if (c != null && !c.isCompleted) c.completeError(error);
     // Не держим завершённый completer и помечаем show отменённым: поздний
@@ -759,7 +876,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   @override
   Widget build(BuildContext context) {
-    if (!_proxyReady || (_useLocalPageMode && _pageUri == null)) {
+    if (!_proxyReady || (_useLocalPageMode && !_localPageReady)) {
       return const SizedBox.shrink();
     }
 
@@ -815,11 +932,10 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                       child: _IntercomWebView(
                         webViewKey: _webViewKey,
                         keepAlive: _keepAlive,
-                        initialUrlRequest: _useLocalPageMode
-                            ? URLRequest(url: WebUri(_pageUri.toString()))
-                            : null,
                         proxyConfig: widget.proxyConfig,
                         originHost: Uri.parse(widget.baseUrl).host,
+                        localPageUri: _useLocalPageMode ? _localPageUri : null,
+                        onLocalPageHttpError: _onLocalPageHttpError,
                         onCreated: _onWebViewCreated,
                         elapsedMs: _elapsedMs,
                       ),
@@ -898,13 +1014,74 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       },
     );
 
-    if (_useLocalPageMode) return;
+    if (_useLocalPageMode) {
+      unawaited(_loadLocalPage(controller));
+
+      return;
+    }
 
     controller.loadData(
       data: _buildOverlayHtml(),
       baseUrl: WebUri(widget.baseUrl),
       mimeType: 'text/html',
       encoding: 'utf-8',
+    );
+  }
+
+  /// Windows: маппит хост из baseUrl на временную папку со страницей и грузит
+  /// её как https://<хост>/index.html. Маппинг обязан встать ДО навигации -
+  /// поэтому вебвью создаётся без initialUrlRequest, а loadUrl зовётся только
+  /// после подтверждения маппинга. Любой сбой рвёт show с причиной сразу,
+  /// не дожидаясь fallback-таймера.
+  /// Адрес локальной страницы: хост И схема из baseUrl - origin обязан
+  /// совпасть с мобилками (loadData с этим же baseUrl), иначе trusted domains
+  /// Intercom разойдутся между платформами.
+  Uri get _localPageUri {
+    final base = Uri.parse(widget.baseUrl);
+
+    return Uri(scheme: base.scheme, host: base.host, path: '/index.html');
+  }
+
+  Future<void> _loadLocalPage(InAppWebViewController controller) async {
+    final pageUri = _localPageUri;
+    final pageDir = _pageDir;
+    if (pageDir == null) {
+      _completeWithError(
+        const IntercomLoadException('Local page directory is missing.'),
+      );
+
+      return;
+    }
+    try {
+      final mapped = await controller.setVirtualHostNameToFolderMapping(
+        hostName: pageUri.host,
+        folderPath: pageDir.path,
+      );
+      if (!mapped) {
+        _completeWithError(
+          const IntercomLoadException(
+            'Failed to map virtual host for the local page.',
+          ),
+        );
+
+        return;
+      }
+      await controller.loadUrl(
+        urlRequest: URLRequest(url: WebUri(pageUri.toString())),
+      );
+    } on Object catch (e) {
+      _completeWithError(
+        IntercomLoadException('Failed to load local page: $e'),
+      );
+    }
+  }
+
+  /// HTTP-ошибка самой mapped-страницы на фазе загрузки: SDK уже не придёт,
+  /// рвём show сразу, а не молчим до fallback-таймера.
+  void _onLocalPageHttpError(int statusCode) {
+    if (_sdkLoaded) return;
+    _completeWithError(
+      IntercomLoadException('Local page failed to load: HTTP $statusCode'),
     );
   }
 
@@ -930,17 +1107,18 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 }
 
-/// WebView с Intercom Web Messenger: загрузка по [initialUrlRequest] (локальный
-/// режим) либо через `loadData` в [onCreated]. Внешние ссылки уходят в системный
-/// браузер, прокси-авторизация и server-trust обрабатываются здесь. [elapsedMs] -
-/// для относительных таймингов в debug-логах.
+/// WebView с Intercom Web Messenger: контент грузит [onCreated] (`loadData`,
+/// на Windows - virtual host mapping + `loadUrl`). Внешние ссылки уходят в
+/// системный браузер, прокси-авторизация и server-trust обрабатываются здесь.
+/// [elapsedMs] - для относительных таймингов в debug-логах.
 class _IntercomWebView extends StatelessWidget {
   const _IntercomWebView({
     required this.webViewKey,
     required this.keepAlive,
-    required this.initialUrlRequest,
     required this.proxyConfig,
     required this.originHost,
+    required this.localPageUri,
+    required this.onLocalPageHttpError,
     required this.onCreated,
     required this.elapsedMs,
   });
@@ -949,11 +1127,15 @@ class _IntercomWebView extends StatelessWidget {
   // Тёплый токен: при unmount native webview паркуется в пуле, при remount
   // (пробуждение из сна) возвращается тем же - без перезагрузки SDK.
   final InAppWebViewKeepAlive keepAlive;
-  final URLRequest? initialUrlRequest;
   final ProxyConfig? proxyConfig;
   // Хост страницы мессенджера (из baseUrl) - его навигации держим в вебвью,
   // остальные внешние хосты уводим в системный браузер (см. _shouldKeepInWebView).
   final String originHost;
+  // Не-null = local-page-режим (Windows): под mapped-хостом в вебвью существует
+  // только эта страница, любой другой путь хоста локально дал бы 404 вместо
+  // реального сайта - такие навигации уходят в системный браузер.
+  final Uri? localPageUri;
+  final void Function(int statusCode) onLocalPageHttpError;
   final void Function(InAppWebViewController controller) onCreated;
   final int Function() elapsedMs;
 
@@ -962,7 +1144,6 @@ class _IntercomWebView extends StatelessWidget {
     return InAppWebView(
       key: webViewKey,
       keepAlive: keepAlive,
-      initialUrlRequest: initialUrlRequest,
       initialSettings: InAppWebViewSettings(
         javaScriptEnabled: true,
         // Все домены Intercom HTTPS-only, plain HTTP внутри не ожидается -
@@ -1022,6 +1203,9 @@ class _IntercomWebView extends StatelessWidget {
             '[Intercom WebView] +${elapsedMs()}ms httpError: url=${request.url} '
             'status=${errorResponse.statusCode} reason=${errorResponse.reasonPhrase}',
           );
+        }
+        if (_isLocalPageUri(request.url)) {
+          onLocalPageHttpError(errorResponse.statusCode ?? 0);
         }
       },
       onReceivedServerTrustAuthRequest: (_, challenge) async {
@@ -1115,11 +1299,29 @@ class _IntercomWebView extends StatelessWidget {
   bool _shouldKeepInWebView(WebUri uri) {
     final scheme = uri.scheme.toLowerCase();
     if (scheme == 'about' || scheme == 'data' || scheme == 'blob') return true;
-    if (_isLoopbackUri(uri)) return true;
 
     final host = uri.host.toLowerCase();
 
-    return host == originHost || _isIntercomHost(host);
+    if (host == originHost) {
+      // Local-page-режим: ссылка из чата на реальный сайт этого хоста внутри
+      // вебвью попала бы в mapped-папку (там только страница мессенджера) -
+      // держим только саму страницу, остальное в системный браузер.
+      final pageUri = localPageUri;
+      if (pageUri != null) return _isLocalPageUri(uri);
+
+      return true;
+    }
+
+    return _isIntercomHost(host);
+  }
+
+  bool _isLocalPageUri(WebUri? uri) {
+    final pageUri = localPageUri;
+    if (uri == null || pageUri == null) return false;
+
+    return uri.host.toLowerCase() == pageUri.host &&
+        uri.path == pageUri.path &&
+        uri.scheme.toLowerCase() == pageUri.scheme;
   }
 
   bool _isIntercomHost(String host) {
@@ -1131,11 +1333,6 @@ class _IntercomWebView extends StatelessWidget {
     ];
 
     return domains.any((d) => host == d || host.endsWith('.$d'));
-  }
-
-  bool _isLoopbackUri(WebUri uri) {
-    final host = uri.host.toLowerCase();
-    return host == '127.0.0.1' || host == 'localhost';
   }
 }
 
