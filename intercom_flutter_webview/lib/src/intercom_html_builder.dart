@@ -193,9 +193,9 @@ class IntercomHtmlBuilder {
         s.async = true;
         s.src = 'https://widget.intercom.io/widget/$safeAppId';
         s.onload = function() {
-          // Момент реальной загрузки loader-скрипта widget.intercom.io.
-          // Уходит в onConsoleMessage - видно, сколько заняла сеть до JS.
-          console.log('[Intercom HTML] loader onload ' + performance.now());
+          // Момент реальной загрузки loader-скрипта widget.intercom.io -
+          // граница "сеть до JS" в таймингах загрузки.
+          _notifyFlutter('onIntercomLoaderLoaded');
           $showJs
         };
         s.onerror = function() {
