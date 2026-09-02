@@ -926,6 +926,10 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   void _completeReady() {
+    // Вытесненный/уничтоженный оверлей ещё смонтирован до следующего кадра:
+    // его поздний onShow не должен завершать completer уже нового show чужим
+    // kind/таймингами. Тот же гард, что в _completeWithError.
+    if (_showCancelled || IntercomWebViewOverlay._state != this) return;
     final c = IntercomWebViewOverlay._readyCompleter;
     if (c == null || c.isCompleted) return;
     if (_coldShowCompleted) {
