@@ -260,6 +260,10 @@ class IntercomWebViewOverlay {
         ),
       );
     }
+    // Старый state смонтирован до следующего кадра: без пометки поздний onShow
+    // успел бы включить framework back, перекрасить system chrome и дёрнуть
+    // onShown уже после destroy. Completer выше защищён отдельно.
+    _state?._showCancelled = true;
     _state = null;
     _entry?.remove();
     _entry?.dispose();
@@ -758,17 +762,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   /// Повторное открытие. Из сна - будит webview (reattach из keepAlive), иначе -
   /// сразу JS-показ на тёплом контроллере.
   void _showIntercom() {
-    // Уже просыпаемся (ждём свежий контроллер из reattach) - повторный show
-    // игнорируем: показ дёрнется в _onWebViewCreated, а _controller сейчас обнулён.
-    // Future нового caller'а застрахован fallback-таймером первого show (он взведён
-    // при входе в waking-ветку) - отдельный таймаут тут не нужен.
-    if (_pendingShowAfterWake) return;
     _showCancelled = false;
-    _cancelSleepTimer();
-    _interruptClose();
     // На тёплом reopen initState-таймера уже нет (отменён в _onIntercomReady), а
     // onShow на warm-state SDK может не прийти - ставим свой таймаут, иначе caller
-    // (await show) висит вечно со спиннером.
+    // (await show) висит вечно со спиннером. Перевзводим ДО проверки пробуждения:
+    // show, пришедший во время reattach, приносит свой таймаут, и его future
+    // должен ждать именно столько, а не остаток таймера прошлого caller'а.
     _fallbackTimer?.cancel();
     _fallbackTimer = Timer(_fallbackCloseDelay, () {
       if (mounted && !_intercomVisible && !_showCancelled) {
@@ -778,6 +777,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         );
       }
     });
+    // Уже просыпаемся (ждём свежий контроллер из reattach) - повторный show
+    // дальше не ведём: показ дёрнется в _onWebViewCreated, а _controller сейчас
+    // обнулён.
+    if (_pendingShowAfterWake) return;
+    _cancelSleepTimer();
+    _interruptClose();
 
     if (_sleeping) {
       // Спим: возвращаем InAppWebView в дерево (reattach тёплого инстанса), показ
