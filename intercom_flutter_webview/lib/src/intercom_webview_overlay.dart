@@ -198,6 +198,9 @@ class IntercomWebViewOverlay {
           baseUrl: baseUrl,
         )) {
       _state!._coverBuilder = coverBuilder;
+      // Таймаут каждого show свой: тёплый инстанс создан с задержкой первого
+      // холодного show, а caller мог прийти с другой (короткая вторая попытка).
+      _state!._fallbackCloseDelay = fallbackCloseDelay;
       _state!._showIntercom();
 
       return _readyCompleter!.future;
@@ -253,7 +256,7 @@ class IntercomWebViewOverlay {
         IntercomLoadException(
           IntercomLoadFailure.destroyed,
           'Intercom destroyed',
-          timings: _state?._timings ?? const IntercomLoadTimings(),
+          timings: _state?._failureTimings ?? const IntercomLoadTimings(),
         ),
       );
     }
@@ -420,6 +423,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   int? _readyMs;
   // Первый onShow этого инстанса - холодная загрузка; все последующие - тёплые.
   bool _coldShowCompleted = false;
+  // Таймаут текущего show: initState берёт его из виджета, тёплый reopen
+  // получает свой от нового вызова show().
+  late Duration _fallbackCloseDelay;
 
   IntercomLoadTimings get _timings => IntercomLoadTimings(
         proxyAppliedMs: _proxyAppliedMs,
@@ -427,6 +433,12 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         loaderLoadedMs: _loaderLoadedMs,
         readyMs: _readyMs,
       );
+
+  // Стадии в исключении описывают ТЕКУЩУЮ попытку. После загрузки SDK стадии
+  // относятся к прошлой холодной загрузке - на тёплом reopen их не отдаём,
+  // иначе таймаут переоткрытия выглядит как "все стадии прошли".
+  IntercomLoadTimings get _failureTimings =>
+      _sdkLoaded ? const IntercomLoadTimings() : _timings;
 
   // Windows: WebView2 не умеет loadData с baseUrl, поэтому страница подаётся
   // локальным файлом через virtual host mapping - документ получает origin
@@ -438,6 +450,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   void initState() {
     super.initState();
     _showStartedAt = DateTime.now();
+    _fallbackCloseDelay = widget.fallbackCloseDelay;
     _coverBuilder = widget.coverBuilder;
     _keepAlive = InAppWebViewKeepAlive();
     IntercomWebViewOverlay._state = this;
@@ -541,7 +554,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   void _startFallbackTimer() {
-    _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
+    _fallbackTimer = Timer(_fallbackCloseDelay, () {
       if (!_sdkLoaded && mounted && !_closing) {
         _completeWithError(
           IntercomLoadFailure.timeout,
@@ -757,7 +770,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // onShow на warm-state SDK может не прийти - ставим свой таймаут, иначе caller
     // (await show) висит вечно со спиннером.
     _fallbackTimer?.cancel();
-    _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
+    _fallbackTimer = Timer(_fallbackCloseDelay, () {
       if (mounted && !_intercomVisible && !_showCancelled) {
         _completeWithError(
           IntercomLoadFailure.reopenTimeout,
@@ -926,7 +939,11 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   }
 
   void _completeWithError(IntercomLoadFailure reason, String message) {
-    final error = IntercomLoadException(reason, message, timings: _timings);
+    final error = IntercomLoadException(
+      reason,
+      message,
+      timings: _failureTimings,
+    );
     // Ошибка от уже вытесненного/уничтоженного оверлея (висящий await из
     // _prepareOverlay/_loadLocalPage дострелил после dispose или в кадровом
     // зазоре supersede) не должна бить в статический completer: он уже
@@ -1046,6 +1063,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
                         originHost: Uri.parse(widget.baseUrl).host,
                         localPageUri: _useLocalPageMode ? _localPageUri : null,
                         onLocalPageHttpError: _onLocalPageHttpError,
+                        onLocalPageLoadError: _onLocalPageLoadError,
                         onCreated: _onWebViewCreated,
                         elapsedMs: _elapsedMs,
                       ),
@@ -1207,6 +1225,17 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     );
   }
 
+  /// Сетевая/навигационная ошибка mapped-страницы (loadUrl её не бросает,
+  /// она приходит колбэком): без этого show молчал бы до таймаута и ушёл бы в
+  /// аналитику как timeout, а не как сбой локальной страницы.
+  void _onLocalPageLoadError(String description) {
+    if (_sdkLoaded) return;
+    _completeWithError(
+      IntercomLoadFailure.localPageFailed,
+      'Local page failed to load: $description',
+    );
+  }
+
   String _buildOverlayHtml() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final padding = MediaQuery.of(context).padding;
@@ -1241,6 +1270,7 @@ class _IntercomWebView extends StatelessWidget {
     required this.originHost,
     required this.localPageUri,
     required this.onLocalPageHttpError,
+    required this.onLocalPageLoadError,
     required this.onCreated,
     required this.elapsedMs,
   });
@@ -1258,6 +1288,7 @@ class _IntercomWebView extends StatelessWidget {
   // реального сайта - такие навигации уходят в системный браузер.
   final Uri? localPageUri;
   final void Function(int statusCode) onLocalPageHttpError;
+  final void Function(String description) onLocalPageLoadError;
   final void Function(InAppWebViewController controller) onCreated;
   final int Function() elapsedMs;
 
@@ -1317,6 +1348,9 @@ class _IntercomWebView extends StatelessWidget {
             '[Intercom WebView] +${elapsedMs()}ms loadError: url=${request.url} '
             'type=${error.type} desc=${error.description}',
           );
+        }
+        if (_isLocalPageUri(request.url)) {
+          onLocalPageLoadError('${error.type}: ${error.description}');
         }
       },
       onReceivedHttpError: (_, request, errorResponse) {
