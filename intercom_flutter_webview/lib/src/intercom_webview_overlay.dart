@@ -10,13 +10,87 @@ import 'package:url_launcher/url_launcher.dart';
 import 'intercom_html_builder.dart';
 import 'proxy_config.dart';
 
-/// Исключение при неудачной загрузке Intercom.
-class IntercomLoadException implements Exception {
-  final String message;
-  const IntercomLoadException(this.message);
+/// Почему Intercom не открылся. Приложение классифицирует по этому полю, а не
+/// по тексту [IntercomLoadException.message].
+enum IntercomLoadFailure {
+  /// Холодная загрузка не дошла до `onShow` за `fallbackCloseDelay`.
+  timeout,
+
+  /// Тёплое переоткрытие не дало `onShow` за `fallbackCloseDelay`.
+  reopenTimeout,
+
+  /// Прокси не применился: платформа без поддержки или нативная ошибка.
+  proxyApplyFailed,
+
+  /// Загрузчик SDK не загрузился либо страница сообщила об ошибке.
+  sdkLoadFailed,
+
+  /// Windows: локальная страница мессенджера не подготовилась или не загрузилась.
+  localPageFailed,
+
+  /// [IntercomWebViewOverlay.destroy] во время загрузки.
+  destroyed,
+}
+
+/// Тайминги стадий холодной загрузки, мс от старта [IntercomWebViewOverlay.show].
+/// `null` - стадия не наступила (на ошибке видно, где загрузка застряла).
+class IntercomLoadTimings {
+  final int? proxyAppliedMs;
+  final int? webViewCreatedMs;
+  final int? loaderLoadedMs;
+  final int? readyMs;
+
+  const IntercomLoadTimings({
+    this.proxyAppliedMs,
+    this.webViewCreatedMs,
+    this.loaderLoadedMs,
+    this.readyMs,
+  });
 
   @override
-  String toString() => 'IntercomLoadException: $message';
+  String toString() =>
+      'IntercomLoadTimings(proxy=$proxyAppliedMs, webView=$webViewCreatedMs, '
+      'loader=$loaderLoadedMs, ready=$readyMs)';
+}
+
+/// Каким путём завершился [IntercomWebViewOverlay.show].
+enum IntercomShowKind {
+  /// SDK загружен с нуля, [IntercomShowResult.timings] заполнены.
+  cold,
+
+  /// Показ тёплого инстанса (SDK уже был загружен).
+  warm,
+
+  /// Показ перехвачен следующим вызовом `show` (дабл-тап): чат откроет он.
+  superseded,
+}
+
+/// Итог удачного [IntercomWebViewOverlay.show].
+class IntercomShowResult {
+  final IntercomShowKind kind;
+
+  /// Тайминги холодной загрузки; только для [IntercomShowKind.cold].
+  final IntercomLoadTimings? timings;
+
+  const IntercomShowResult({required this.kind, this.timings});
+}
+
+/// Исключение при неудачной загрузке Intercom.
+class IntercomLoadException implements Exception {
+  final IntercomLoadFailure reason;
+  final String message;
+
+  /// Стадии, которые успели пройти до ошибки.
+  final IntercomLoadTimings timings;
+
+  const IntercomLoadException(
+    this.reason,
+    this.message, {
+    this.timings = const IntercomLoadTimings(),
+  });
+
+  @override
+  String toString() => 'IntercomLoadException(${reason.name}): $message';
 }
 
 /// Строит заглушку поверх вебвью на момент показа. [reveal] - прогресс раскрытия
@@ -56,7 +130,7 @@ class IntercomWebViewOverlay {
 
   static _OverlayWidgetState? _state;
   static OverlayEntry? _entry;
-  static Completer<void>? _readyCompleter;
+  static Completer<IntercomShowResult>? _readyCompleter;
 
   /// Callback при изменении количества непрочитанных разговоров.
   /// Работает после первого вызова [show].
@@ -72,8 +146,10 @@ class IntercomWebViewOverlay {
   /// Первый вызов: создаёт WebView, грузит SDK, показывает Intercom.
   /// Повторные вызовы: мгновенный `Intercom('show')` через JS.
   ///
-  /// Бросает [IntercomLoadException] если SDK не загрузился.
-  static Future<void> show(
+  /// Резолвится, когда мессенджер показан (`onShow`); [IntercomShowResult.kind]
+  /// говорит, была ли это холодная загрузка. Бросает [IntercomLoadException],
+  /// если SDK не загрузился.
+  static Future<IntercomShowResult> show(
     BuildContext context, {
     required String appId,
     String? userId,
@@ -102,9 +178,11 @@ class IntercomWebViewOverlay {
     // goToSupportChat и мог увести на webapp-fallback при дабл-тапе.
     final prevCompleter = _readyCompleter;
     if (prevCompleter != null && !prevCompleter.isCompleted) {
-      prevCompleter.complete();
+      prevCompleter.complete(
+        const IntercomShowResult(kind: IntercomShowKind.superseded),
+      );
     }
-    _readyCompleter = Completer<void>();
+    _readyCompleter = Completer<IntercomShowResult>();
 
     // Переиспользуем тёплый оверлей только если identity/appId/baseUrl те же.
     // Иначе (logout->login, смена юзера) показали бы чат прошлого юзера -
@@ -121,8 +199,8 @@ class IntercomWebViewOverlay {
         )) {
       _state!._coverBuilder = coverBuilder;
       _state!._showIntercom();
-      await _readyCompleter!.future;
-      return;
+
+      return _readyCompleter!.future;
     }
 
     if (_entry != null) {
@@ -159,7 +237,7 @@ class IntercomWebViewOverlay {
     _entry = OverlayEntry(builder: (_) => overlayWidget);
     overlay.insert(_entry!);
 
-    await _readyCompleter!.future;
+    return _readyCompleter!.future;
   }
 
   /// Уничтожить WebView и освободить память немедленно.
@@ -171,7 +249,13 @@ class IntercomWebViewOverlay {
     // дорезолвился) не должен зависнуть навсегда - завершаем ошибкой.
     final completer = _readyCompleter;
     if (completer != null && !completer.isCompleted) {
-      completer.completeError(const IntercomLoadException('Intercom destroyed'));
+      completer.completeError(
+        IntercomLoadException(
+          IntercomLoadFailure.destroyed,
+          'Intercom destroyed',
+          timings: _state?._timings ?? const IntercomLoadTimings(),
+        ),
+      );
     }
     _state = null;
     _entry?.remove();
@@ -326,8 +410,23 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // удаление сам, тогда clearSession ждёт этот Future, а не потерянную ссылку.
   static Directory? _lastPageDir;
   static Future<void>? _lastPageDeletion;
-  // Момент старта загрузки (создание виджета) для относительных таймингов в логах.
+  // Момент старта загрузки (создание виджета) для относительных таймингов.
   DateTime? _showStartedAt;
+  // Стадии холодной загрузки, мс от _showStartedAt. Уходят наружу в результате
+  // show и в исключении (по ним видно, где застряла неудачная загрузка).
+  int? _proxyAppliedMs;
+  int? _webViewCreatedMs;
+  int? _loaderLoadedMs;
+  int? _readyMs;
+  // Первый onShow этого инстанса - холодная загрузка; все последующие - тёплые.
+  bool _coldShowCompleted = false;
+
+  IntercomLoadTimings get _timings => IntercomLoadTimings(
+        proxyAppliedMs: _proxyAppliedMs,
+        webViewCreatedMs: _webViewCreatedMs,
+        loaderLoadedMs: _loaderLoadedMs,
+        readyMs: _readyMs,
+      );
 
   // Windows: WebView2 не умеет loadData с baseUrl, поэтому страница подаётся
   // локальным файлом через virtual host mapping - документ получает origin
@@ -445,10 +544,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
       if (!_sdkLoaded && mounted && !_closing) {
         _completeWithError(
-          const IntercomLoadException(
-            'Intercom failed to load (timeout). '
-            'Check network connection or proxy settings.',
-          ),
+          IntercomLoadFailure.timeout,
+          'Intercom failed to load (timeout). '
+          'Check network connection or proxy settings.',
         );
       }
     });
@@ -463,13 +561,13 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       // монтируется (build ждёт _proxyReady), прямого коннекта не будет.
       if (!applied) {
         _completeWithError(
-          const IntercomLoadException(
-            'Failed to apply proxy. Check proxy settings or platform support.',
-          ),
+          IntercomLoadFailure.proxyApplyFailed,
+          'Failed to apply proxy. Check proxy settings or platform support.',
         );
 
         return;
       }
+      _proxyAppliedMs = _elapsedMs();
     }
     if (_useLocalPageMode) {
       try {
@@ -479,7 +577,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         // молчим до fallback-таймера: caller уйдёт на webapp быстро, а в логе
         // останется что именно упало.
         _completeWithError(
-          IntercomLoadException('Failed to prepare local page: $e'),
+          IntercomLoadFailure.localPageFailed,
+          'Failed to prepare local page: $e',
         );
 
         return;
@@ -566,6 +665,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     // SDK догрузился: запоминаем это и гасим fallback-таймер, чтобы будущий
     // show шёл по мгновенной ветке - даже если текущий show уже отменён.
     _sdkLoaded = true;
+    _readyMs ??= _elapsedMs();
     _fallbackTimer?.cancel();
     // SDK загружен - файл с identity на диске больше не нужен, чем короче он
     // живёт, тем уже окно чтения токена чужим процессом.
@@ -660,7 +760,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     _fallbackTimer = Timer(widget.fallbackCloseDelay, () {
       if (mounted && !_intercomVisible && !_showCancelled) {
         _completeWithError(
-          const IntercomLoadException('Intercom failed to reopen (timeout).'),
+          IntercomLoadFailure.reopenTimeout,
+          'Intercom failed to reopen (timeout).',
         );
       }
     });
@@ -813,10 +914,19 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
   void _completeReady() {
     final c = IntercomWebViewOverlay._readyCompleter;
-    if (c != null && !c.isCompleted) c.complete();
+    if (c == null || c.isCompleted) return;
+    if (_coldShowCompleted) {
+      c.complete(const IntercomShowResult(kind: IntercomShowKind.warm));
+      return;
+    }
+    _coldShowCompleted = true;
+    c.complete(
+      IntercomShowResult(kind: IntercomShowKind.cold, timings: _timings),
+    );
   }
 
-  void _completeWithError(Object error) {
+  void _completeWithError(IntercomLoadFailure reason, String message) {
+    final error = IntercomLoadException(reason, message, timings: _timings);
     // Ошибка от уже вытесненного/уничтоженного оверлея (висящий await из
     // _prepareOverlay/_loadLocalPage дострелил после dispose или в кадровом
     // зазоре supersede) не должна бить в статический completer: он уже
@@ -975,10 +1085,20 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       return;
     }
     _initialLoadDone = true;
+    _webViewCreatedMs = _elapsedMs();
 
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomHide',
       callback: (_) => _hide(),
+    );
+    controller.addJavaScriptHandler(
+      handlerName: 'onIntercomLoaderLoaded',
+      callback: (_) {
+        _loaderLoadedMs ??= _elapsedMs();
+        if (kDebugMode) {
+          debugPrint('[Intercom WebView] loader loaded +${_loaderLoadedMs}ms');
+        }
+      },
     );
     controller.addJavaScriptHandler(
       handlerName: 'onIntercomReady',
@@ -1001,7 +1121,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       handlerName: 'onIntercomError',
       callback: (args) {
         final msg = args.isNotEmpty ? args[0] as String : 'Unknown error';
-        _completeWithError(IntercomLoadException(msg));
+        _completeWithError(IntercomLoadFailure.sdkLoadFailed, msg);
       },
     );
     controller.addJavaScriptHandler(
@@ -1047,7 +1167,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     final pageDir = _pageDir;
     if (pageDir == null) {
       _completeWithError(
-        const IntercomLoadException('Local page directory is missing.'),
+        IntercomLoadFailure.localPageFailed,
+        'Local page directory is missing.',
       );
 
       return;
@@ -1059,9 +1180,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       );
       if (!mapped) {
         _completeWithError(
-          const IntercomLoadException(
-            'Failed to map virtual host for the local page.',
-          ),
+          IntercomLoadFailure.localPageFailed,
+          'Failed to map virtual host for the local page.',
         );
 
         return;
@@ -1071,7 +1191,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       );
     } on Object catch (e) {
       _completeWithError(
-        IntercomLoadException('Failed to load local page: $e'),
+        IntercomLoadFailure.localPageFailed,
+        'Failed to load local page: $e',
       );
     }
   }
@@ -1081,7 +1202,8 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   void _onLocalPageHttpError(int statusCode) {
     if (_sdkLoaded) return;
     _completeWithError(
-      IntercomLoadException('Local page failed to load: HTTP $statusCode'),
+      IntercomLoadFailure.localPageFailed,
+      'Local page failed to load: HTTP $statusCode',
     );
   }
 
