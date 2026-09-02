@@ -264,6 +264,9 @@ class IntercomWebViewOverlay {
     // успел бы включить framework back, перекрасить system chrome и дёрнуть
     // onShown уже после destroy. Completer выше защищён отдельно.
     _state?._showCancelled = true;
+    // destroy поверх открытого чата (logout/revoke): штатное закрытие с его
+    // восстановлением system UI уже не случится.
+    _state?._restoreSystemUi();
     _state = null;
     _entry?.remove();
     _entry?.dispose();
@@ -883,11 +886,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     void finishClose() {
       if (!mounted || _closeToken != token) return;
       _closeToken = null;
-      // Чат закрыт - back снова обрабатывает система/Navigator.
-      SystemNavigator.setFrameworkHandlesBack(false);
-      // Возвращаем стиль баров приложения (на открытии красили в фон чата).
-      final previous = _previousChrome;
-      if (previous != null) SystemChrome.setSystemUIOverlayStyle(previous);
+      _restoreSystemUi();
       setState(() {
         _covered = false;
         _intercomVisible = false;
@@ -928,6 +927,18 @@ class _OverlayWidgetState extends State<_OverlayWidget>
 
     // 1) Контент уходит под заглушку (fade in), 2) схлопываем контейнер в кнопку.
     _fadeController.forward(from: 0).whenComplete(collapse);
+  }
+
+  /// Чат уходит с экрана - back снова обрабатывает система/Navigator, стиль
+  /// баров приложения возвращается (на открытии красили в фон чата).
+  /// Идемпотентно: зовётся и из штатного закрытия, и из [IntercomWebViewOverlay.destroy]
+  /// поверх открытого чата (logout/revoke), иначе глобальный UI оставался бы
+  /// в состоянии чата.
+  void _restoreSystemUi() {
+    if (!_intercomVisible && !_closing) return;
+    SystemNavigator.setFrameworkHandlesBack(false);
+    final previous = _previousChrome;
+    if (previous != null) SystemChrome.setSystemUIOverlayStyle(previous);
   }
 
   void _completeReady() {
