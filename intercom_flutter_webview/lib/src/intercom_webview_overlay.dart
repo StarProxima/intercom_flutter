@@ -19,7 +19,8 @@ enum IntercomLoadFailure {
   /// Тёплое переоткрытие не дало `onShow` за `fallbackCloseDelay`.
   reopenTimeout,
 
-  /// Прокси не применился: платформа без поддержки или нативная ошибка.
+  /// Прокси не применился (платформа без поддержки или нативная ошибка), либо
+  /// показ без прокси не смог снять прокси прошлого показа.
   proxyApplyFailed,
 
   /// Загрузчик SDK не загрузился либо страница сообщила об ошибке.
@@ -588,6 +589,13 @@ class _OverlayWidgetState extends State<_OverlayWidget>
         return;
       }
       _proxyAppliedMs = _elapsedMs();
+    } else if (!await ProxyConfig.clearAnyProxy()) {
+      _completeWithError(
+        IntercomLoadFailure.proxyApplyFailed,
+        'Failed to clear proxy before direct load.',
+      );
+
+      return;
     }
     if (_useLocalPageMode) {
       try {
