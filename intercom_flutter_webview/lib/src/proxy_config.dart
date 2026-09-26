@@ -99,6 +99,31 @@ class ProxyConfig {
     return ProxySettings(proxyRules: [rule]);
   }
 
+  /// Снимает override, кто бы из оверлеев его ни поставил, после всех уже
+  /// поставленных в очередь операций. Показ без прокси обязан дождаться этого до
+  /// загрузки: прошлый оверлей снимает свой прокси асинхронно на dispose, и без
+  /// ожидания новый WebView пошёл бы в ещё стоящий прокси без кредов.
+  ///
+  /// false - override стоит, а снять его не удалось.
+  static Future<bool> clearAnyProxy() {
+    if (!_isSupported) return Future<bool>.value(true);
+
+    return _serialize(() async {
+      if (_owner == null) return true;
+      try {
+        await ProxyController.instance().clearProxyOverride();
+        _owner = null;
+        if (kDebugMode) debugPrint('[ProxyConfig] Proxy cleared for direct load');
+
+        return true;
+      } catch (e) {
+        if (kDebugMode) debugPrint('[ProxyConfig] Failed to clear proxy: $e');
+
+        return false;
+      }
+    });
+  }
+
   /// Сброс прокси. Чистит override только если [owner] всё ещё владеет им -
   /// иначе (другой оверлей уже поставил свой прокси) это был бы no-op-стирание
   /// чужого override (гонка на retry).
