@@ -18,6 +18,10 @@ class IntercomHtmlBuilder {
   /// Timestamp (int в секундах) форматируется как дата в дашборде.
   final Map<String, dynamic>? customAttributes;
 
+  /// Текст нового сообщения: мессенджер откроется сразу на нём, а не на
+  /// списке переписок.
+  final String? message;
+
   /// 'light' или 'dark'
   final String colorScheme;
 
@@ -40,6 +44,7 @@ class IntercomHtmlBuilder {
     this.userJwt,
     this.userName,
     this.customAttributes,
+    this.message,
     this.colorScheme = 'light',
     this.backgroundColorCss = '#000000',
     this.topInset = 0,
@@ -55,6 +60,12 @@ class IntercomHtmlBuilder {
         .replaceAll('\r', r'\r')
         .replaceAll('</', r'<\/');
   }
+
+  /// JS-вызов показа мессенджера: с [message] - новое сообщение с этим
+  /// текстом, без него - список переписок.
+  static String showCall(String? message) => message == null
+      ? "window.Intercom('show');"
+      : "window.Intercom('showNewMessage', '${_escapeJs(message)}');";
 
   String build() {
     final safeAppId = _escapeJs(appId);
@@ -99,8 +110,8 @@ class IntercomHtmlBuilder {
     final topPx = topInset.toInt();
     final bottomPx = bottomInset.toInt();
 
-    const showJs = '''
-          window.Intercom('show');
+    final showJs = '''
+          ${showCall(message)}
           window.Intercom('onShow', function() {
             _notifyFlutter('onIntercomReady');
             _whenMessengerPainted(function() {
