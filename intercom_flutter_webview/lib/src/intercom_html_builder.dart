@@ -52,19 +52,21 @@ class IntercomHtmlBuilder {
   });
 
   /// Экранирует строку для вставки в JS литерал внутри одинарных кавычек.
+  /// `<` тоже экранируется: литерал стоит внутри `<script>`, и `<!--` или
+  /// `</script>` в пользовательском тексте сломали бы разбор страницы.
   static String _escapeJs(String value) {
     return value
         .replaceAll(r'\', r'\\')
         .replaceAll("'", r"\'")
         .replaceAll('\n', r'\n')
         .replaceAll('\r', r'\r')
-        .replaceAll('</', r'<\/');
+        .replaceAll('<', r'\x3C');
   }
 
   /// JS-вызов показа мессенджера: с [message] - новое сообщение с этим
   /// текстом, без него - список переписок.
   static String showCall(String? message) => message == null
-      ? "window.Intercom('show');"
+      ? "_cancelPrefill(); window.Intercom('show');"
       : "_showNewMessage('${_escapeJs(message)}');";
 
   String build() {
@@ -172,16 +174,25 @@ class IntercomHtmlBuilder {
     // Текст, переданный до того, как отрисовано поле ввода, Intercom теряет:
     // на холодной загрузке новое сообщение открывается пустым. Поэтому, когда
     // поле появилось и оно пустое, вызов повторяется. Поля не дождались за
-    // ~20с - последняя попытка без него.
+    // ~20с - последняя попытка без него. Повтор живёт только до следующего
+    // показа или закрытия чата, иначе вписал бы старый текст в чужой показ.
+    var _prefillTimer = null;
+
+    function _cancelPrefill() {
+      clearInterval(_prefillTimer);
+      _prefillTimer = null;
+    }
+
     function _showNewMessage(text) {
+      _cancelPrefill();
       window.Intercom('showNewMessage', text);
       var tries = 0;
-      var iv = setInterval(function() {
+      _prefillTimer = setInterval(function() {
         var frame = document.querySelector('iframe[name=intercom-messenger-frame]');
         var doc = frame && frame.contentDocument;
         var composer = doc && doc.querySelector('[contenteditable=true]');
         if (!composer && ++tries <= 80) return;
-        clearInterval(iv);
+        _cancelPrefill();
         if (!composer || composer.textContent === '') {
           window.Intercom('showNewMessage', text);
         }
@@ -240,6 +251,7 @@ class IntercomHtmlBuilder {
     })();
 
     window.Intercom('onHide', function() {
+      _cancelPrefill();
       _notifyFlutter('onIntercomHide');
     });
   </script>
