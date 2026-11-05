@@ -65,7 +65,7 @@ class IntercomHtmlBuilder {
   /// текстом, без него - список переписок.
   static String showCall(String? message) => message == null
       ? "window.Intercom('show');"
-      : "window.Intercom('showNewMessage', '${_escapeJs(message)}');";
+      : "_showNewMessage('${_escapeJs(message)}');";
 
   String build() {
     final safeAppId = _escapeJs(appId);
@@ -167,6 +167,25 @@ class IntercomHtmlBuilder {
       if (window.flutter_inappwebview) {
         window.flutter_inappwebview.callHandler(handler, data);
       }
+    }
+
+    // Текст, переданный до того, как отрисовано поле ввода, Intercom теряет:
+    // на холодной загрузке новое сообщение открывается пустым. Поэтому, когда
+    // поле появилось и оно пустое, вызов повторяется. Поля не дождались за
+    // ~20с - последняя попытка без него.
+    function _showNewMessage(text) {
+      window.Intercom('showNewMessage', text);
+      var tries = 0;
+      var iv = setInterval(function() {
+        var frame = document.querySelector('iframe[name=intercom-messenger-frame]');
+        var doc = frame && frame.contentDocument;
+        var composer = doc && doc.querySelector('[contenteditable=true]');
+        if (!composer && ++tries <= 80) return;
+        clearInterval(iv);
+        if (!composer || composer.textContent === '') {
+          window.Intercom('showNewMessage', text);
+        }
+      }, 250);
     }
 
     // Ждёт, пока фрейм мессенджера появится и реально отрисуется (size > 0 +
