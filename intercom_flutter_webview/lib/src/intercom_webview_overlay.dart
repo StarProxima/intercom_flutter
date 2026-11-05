@@ -147,6 +147,9 @@ class IntercomWebViewOverlay {
   /// Первый вызов: создаёт WebView, грузит SDK, показывает Intercom.
   /// Повторные вызовы: мгновенный `Intercom('show')` через JS.
   ///
+  /// [message] открывает вместо списка переписок новое сообщение с этим
+  /// текстом (`Intercom('showNewMessage')`): человек дописывает и отправляет.
+  ///
   /// Резолвится, когда мессенджер показан (`onShow`); [IntercomShowResult.kind]
   /// говорит, была ли это холодная загрузка. Бросает [IntercomLoadException],
   /// если SDK не загрузился.
@@ -159,6 +162,7 @@ class IntercomWebViewOverlay {
     String? userJwt,
     String? userName,
     Map<String, dynamic>? customAttributes,
+    String? message,
     ProxyConfig? proxyConfig,
     // origin документа WebView - должен быть в authorized domains workspace
     // Intercom, иначе messenger/web/ping -> 403 "domain not allowed".
@@ -202,6 +206,7 @@ class IntercomWebViewOverlay {
       // Таймаут каждого show свой: тёплый инстанс создан с задержкой первого
       // холодного show, а caller мог прийти с другой (короткая вторая попытка).
       _state!._fallbackCloseDelay = fallbackCloseDelay;
+      _state!._message = message;
       _state!._showIntercom();
 
       return _readyCompleter!.future;
@@ -231,6 +236,7 @@ class IntercomWebViewOverlay {
       userJwt: userJwt,
       userName: userName,
       customAttributes: customAttributes,
+      message: message,
       proxyConfig: proxyConfig,
       baseUrl: baseUrl,
       backgroundColor: backgroundColor,
@@ -328,6 +334,7 @@ class _OverlayWidget extends StatefulWidget {
   final String? userJwt;
   final String? userName;
   final Map<String, dynamic>? customAttributes;
+  final String? message;
   final ProxyConfig? proxyConfig;
   final String baseUrl;
   final Color backgroundColor;
@@ -342,6 +349,7 @@ class _OverlayWidget extends StatefulWidget {
     this.userJwt,
     this.userName,
     this.customAttributes,
+    this.message,
     this.proxyConfig,
     this.baseUrl = 'https://app.intercom.io',
     this.backgroundColor = const Color(0xFF000000),
@@ -434,6 +442,9 @@ class _OverlayWidgetState extends State<_OverlayWidget>
   // Таймаут текущего show: initState берёт его из виджета, тёплый reopen
   // получает свой от нового вызова show().
   late Duration _fallbackCloseDelay;
+  // Текст нового сообщения текущего show: тёплый reopen получает свой от
+  // нового вызова show(), null - обычный показ списка переписок.
+  String? _message;
 
   IntercomLoadTimings get _timings => IntercomLoadTimings(
         proxyAppliedMs: _proxyAppliedMs,
@@ -459,6 +470,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     super.initState();
     _showStartedAt = DateTime.now();
     _fallbackCloseDelay = widget.fallbackCloseDelay;
+    _message = widget.message;
     _coverBuilder = widget.coverBuilder;
     _keepAlive = InAppWebViewKeepAlive();
     IntercomWebViewOverlay._state = this;
@@ -832,7 +844,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
     controller.evaluateJavascript(
       source: '''
       window.Intercom('update', {theme_mode: '$themeMode'});
-      window.Intercom('show');
+      ${IntercomHtmlBuilder.showCall(_message)}
     ''',
     );
   }
@@ -1278,6 +1290,7 @@ class _OverlayWidgetState extends State<_OverlayWidget>
       userJwt: widget.userJwt,
       userName: widget.userName,
       customAttributes: widget.customAttributes,
+      message: widget.message,
       colorScheme: isDark ? 'dark' : 'light',
       backgroundColorCss: bgCss,
       topInset: padding.top,

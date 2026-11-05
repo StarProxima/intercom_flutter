@@ -18,6 +18,10 @@ class IntercomHtmlBuilder {
   /// Timestamp (int в секундах) форматируется как дата в дашборде.
   final Map<String, dynamic>? customAttributes;
 
+  /// Текст нового сообщения: мессенджер откроется сразу на нём, а не на
+  /// списке переписок.
+  final String? message;
+
   /// 'light' или 'dark'
   final String colorScheme;
 
@@ -40,6 +44,7 @@ class IntercomHtmlBuilder {
     this.userJwt,
     this.userName,
     this.customAttributes,
+    this.message,
     this.colorScheme = 'light',
     this.backgroundColorCss = '#000000',
     this.topInset = 0,
@@ -47,14 +52,22 @@ class IntercomHtmlBuilder {
   });
 
   /// Экранирует строку для вставки в JS литерал внутри одинарных кавычек.
+  /// `<` тоже экранируется: литерал стоит внутри `<script>`, и `<!--` или
+  /// `</script>` в пользовательском тексте сломали бы разбор страницы.
   static String _escapeJs(String value) {
     return value
         .replaceAll(r'\', r'\\')
         .replaceAll("'", r"\'")
         .replaceAll('\n', r'\n')
         .replaceAll('\r', r'\r')
-        .replaceAll('</', r'<\/');
+        .replaceAll('<', r'\x3C');
   }
+
+  /// JS-вызов показа мессенджера: с [message] - новое сообщение с этим
+  /// текстом, без него - список переписок.
+  static String showCall(String? message) => message == null
+      ? "_cancelPrefill(); window.Intercom('show');"
+      : "_showNewMessage('${_escapeJs(message)}');";
 
   String build() {
     final safeAppId = _escapeJs(appId);
@@ -99,8 +112,8 @@ class IntercomHtmlBuilder {
     final topPx = topInset.toInt();
     final bottomPx = bottomInset.toInt();
 
-    const showJs = '''
-          window.Intercom('show');
+    final showJs = '''
+          ${showCall(message)}
           window.Intercom('onShow', function() {
             _notifyFlutter('onIntercomReady');
             _whenMessengerPainted(function() {
@@ -158,6 +171,34 @@ class IntercomHtmlBuilder {
       }
     }
 
+    // Текст, переданный до того, как отрисовано поле ввода, Intercom теряет:
+    // на холодной загрузке новое сообщение открывается пустым. Поэтому, когда
+    // поле появилось и оно пустое, вызов повторяется. Поля не дождались за
+    // ~20с - последняя попытка без него. Повтор живёт только до следующего
+    // показа или закрытия чата, иначе вписал бы старый текст в чужой показ.
+    var _prefillTimer = null;
+
+    function _cancelPrefill() {
+      clearInterval(_prefillTimer);
+      _prefillTimer = null;
+    }
+
+    function _showNewMessage(text) {
+      _cancelPrefill();
+      window.Intercom('showNewMessage', text);
+      var tries = 0;
+      _prefillTimer = setInterval(function() {
+        var frame = document.querySelector('iframe[name=intercom-messenger-frame]');
+        var doc = frame && frame.contentDocument;
+        var composer = doc && doc.querySelector('[contenteditable=true]');
+        if (!composer && ++tries <= 80) return;
+        _cancelPrefill();
+        if (!composer || composer.textContent === '') {
+          window.Intercom('showNewMessage', text);
+        }
+      }, 250);
+    }
+
     // Ждёт, пока фрейм мессенджера появится и реально отрисуется (size > 0 +
     // 2 кадра), затем cb. Сигнал «виджет показался» для аналитики (НЕ блокирует
     // показ - тот идёт по onShow). Таймаут-фоллбэк ~1с.
@@ -210,6 +251,7 @@ class IntercomHtmlBuilder {
     })();
 
     window.Intercom('onHide', function() {
+      _cancelPrefill();
       _notifyFlutter('onIntercomHide');
     });
   </script>
